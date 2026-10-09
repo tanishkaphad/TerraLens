@@ -1,0 +1,12 @@
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+geopandas>=1.0,<2
+shapely>=2.0,<3
+pyproj>=3.7,<4
+numpy>=2.0,<3
+rasterio>=1.4,<2
+Pillow>=11,<13
+open_clip_torch>=2.30,<3
+torch>=2.5,<3
+transformers>=4.51,<5
+openai>=1.68,<3

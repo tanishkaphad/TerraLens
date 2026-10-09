@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f4ee">
+  <title>TerraLens | Geospatial search</title>
+  <style>
+    :root{font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;color:#17221d;background:#f4f4ee;font-synthesis:none;text-rendering:optimizeLegibility}
+    *{box-sizing:border-box}body{margin:0}header{padding:20px 5vw;border-bottom:1px solid #d9ded5;background:#fbfbf7;display:flex;justify-content:space-between;align-items:center}header strong{font-size:19px;letter-spacing:-.04em}header span{font-size:12px;color:#64726a}main{max-width:1440px;margin:auto;padding:32px 5vw 60px}.eyebrow{font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#55725e}h1{font-size:clamp(32px,5vw,52px);letter-spacing:-.055em;line-height:1.02;margin:12px 0}p.lede{color:#59675e;max-width:700px;line-height:1.6;margin-bottom:24px}.search{display:flex;gap:10px;max-width:940px}.search input{min-width:0;flex:1;padding:14px 16px;border:1px solid #cbd3c9;background:#fff;border-radius:8px;font:inherit}.search button,.download{border:0;border-radius:8px;background:#1e5037;color:#fff;font:inherit;font-weight:650;padding:0 20px;cursor:pointer}.search button:disabled{opacity:.6;cursor:wait}.chips{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0 20px}.chip{background:#e7ece4;border:0;border-radius:999px;padding:7px 11px;color:#31533d;font:inherit;font-size:12px;cursor:pointer}.status{min-height:24px;color:#52645a;font-size:13px;margin:12px 0}.status.error{color:#a43d2f}.grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(320px,.9fr);gap:18px;align-items:start}.panel{border:1px solid #d9ded5;background:#fff;border-radius:10px;overflow:hidden}.panel h2{font-size:15px;margin:0;padding:15px 17px;border-bottom:1px solid #e3e7e0}.map-wrap{padding:12px;background:#e9eee8}.map{display:block;width:100%;height:auto;min-height:360px;background:#f7f8f4;border-radius:5px}.map-label{font-size:11px;fill:#66736a}.feature-context{fill:none;stroke:#b27c33;stroke-width:2;opacity:.85}.feature-result{fill:#316c4b;fill-opacity:.25;stroke:#21623e;stroke-width:2.4}.feature-line{fill:none;stroke:#b27c33;stroke-width:3}.feature-point{fill:#b27c33}.legend{padding:9px 16px;color:#637067;font-size:11px;display:flex;gap:16px}.legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;background:#316c4b}.legend i.ref{background:#b27c33}.results{max-height:690px;overflow:auto}.result{padding:15px 16px;border-bottom:1px solid #e6e9e3}.result:last-child{border-bottom:0}.result h3{font-size:14px;margin:0 0 7px}.meta{color:#5d6b62;font-size:12px;line-height:1.6}.result img{width:100%;max-height:190px;object-fit:cover;margin-top:10px;border-radius:5px;background:#e9eee8}.badge{display:inline-block;background:#e4efe6;border-radius:4px;padding:3px 7px;color:#28603e;font-size:10px;font-weight:700;margin:4px 4px 0 0}.download{padding:9px 12px;font-size:12px;margin:12px 15px}.empty{padding:24px;color:#66736a;font-size:13px}.foot{font-size:11px;color:#738077;margin-top:18px;line-height:1.5}@media(max-width:860px){.grid{grid-template-columns:1fr}.map{min-height:290px}.results{max-height:none}}@media(max-width:560px){header{padding:15px 5vw}.search{flex-direction:column}.search button{padding:13px}.search input{height:48px}}
+  </style>
+</head>
+<body>
+  <header><strong>TerraLens</strong><span>Visual evidence. Geographic answers.</span></header>
+  <main>
+    <div class="eyebrow">Multimodal GeoAI search</div>
+    <h1>Search the landscape<br>in plain language.</h1>
+    <p class="lede">Find supported objects in aerial imagery, connect detections to mapped features and inspect the spatial evidence behind each match.</p>
+    <form class="search" id="searchForm"><input id="query" autocomplete="off" maxlength="500" aria-label="Geospatial search" placeholder="Try: Find solar panels within 200 metres of roads"><button id="searchButton" type="submit">Search area</button></form>
+    <div class="chips" id="examples"></div><div class="status" id="status" role="status"></div>
+    <section class="grid">
+      <div class="panel"><h2 id="mapTitle">Spatial results</h2><div class="map-wrap"><svg id="map" class="map" viewBox="0 0 900 500" role="img" aria-label="Map of matched features"></svg></div><div class="legend"><span><i></i>Matched objects</span><span><i class="ref"></i>Related map features</span><span>Geometry view; no basemap</span></div></div>
+      <div class="panel"><h2 id="resultsTitle">Evidence</h2><div class="results" id="results"><div class="empty">Enter a query to see results from the configured data bundle.</div></div><button id="download" class="download" hidden>Download GeoJSON</button></div>
+    </section>
+    <p class="foot" id="foot"></p>
+  </main>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let previousPlan = null;
+    let lastResult = null;
+    const escapeText = (value) => String(value ?? "");
+
+    function coordinates(geometry, out=[]) {
+      if (!geometry) return out;
+      const visit = (value) => {
+        if (!Array.isArray(value)) return;
+        if (value.length >= 2 && typeof value[0] === "number" && typeof value[1] === "number") out.push(value);
+        else value.forEach(visit);
+      };
+      visit(geometry.coordinates); return out;
+    }
+    function pathFor(geometry, project) {
+      if (!geometry) return "";
+      const linePath = (coords, close=false) => coords.map((p,i)=>`${i?"L":"M"}${project(p)[0].toFixed(2)},${project(p)[1].toFixed(2)}`).join(" ")+(close?" Z":"");
+      const g=geometry;
+      if(g.type==="Polygon") return g.coordinates.map(r=>linePath(r,true)).join(" ");
+      if(g.type==="MultiPolygon") return g.coordinates.flatMap(poly=>poly.map(r=>linePath(r,true))).join(" ");
+      if(g.type==="LineString") return linePath(g.coordinates);
+      if(g.type==="MultiLineString") return g.coordinates.map(r=>linePath(r)).join(" ");
+      if(g.type==="Point"){const p=project(g.coordinates);return `<circle class="feature-point" cx="${p[0]}" cy="${p[1]}" r="4"/>`;}
+      if(g.type==="MultiPoint") return g.coordinates.map(c=>{const p=project(c);return `<circle class="feature-point" cx="${p[0]}" cy="${p[1]}" r="4"/>`;}).join("");
+      return "";
+    }
+    function renderMap(results, contexts) {
+      const svg=$("map"); svg.replaceChildren();
+      const features=[...contexts.map(f=>({feature:f,context:true})),...results.map(f=>({feature:f,context:false}))];
+      const all=features.flatMap(x=>coordinates(x.feature.geometry));
+      if(!all.length){svg.innerHTML='<text class="map-label" x="28" y="42">No geometry to display</text>';return;}
+      let minX=Math.min(...all.map(c=>c[0])), maxX=Math.max(...all.map(c=>c[0])), minY=Math.min(...all.map(c=>c[1])), maxY=Math.max(...all.map(c=>c[1]));
+      if(maxX-minX<1e-7){minX-=.0001;maxX+=.0001;} if(maxY-minY<1e-7){minY-=.0001;maxY+=.0001;}
+      const pad=34, scale=Math.min((900-pad*2)/(maxX-minX),(500-pad*2)/(maxY-minY));
+      const usedW=(maxX-minX)*scale,usedH=(maxY-minY)*scale,offX=(900-usedW)/2,offY=(500-usedH)/2;
+      const project=(c)=>[offX+(c[0]-minX)*scale,500-offY-(c[1]-minY)*scale];
+      for(const item of features){
+        const path=pathFor(item.feature.geometry,project); if(!path)continue;
+        if(path.startsWith("<circle")){svg.insertAdjacentHTML("beforeend",path);continue;}
+        const node=document.createElementNS("http://www.w3.org/2000/svg","path");node.setAttribute("d",path);node.setAttribute("class",item.context?"feature-context":(item.feature.geometry.type.includes("Line")?"feature-line":"feature-result"));svg.appendChild(node);
+      }
+      const label=document.createElementNS("http://www.w3.org/2000/svg","text");label.setAttribute("x","18");label.setAttribute("y","482");label.setAttribute("class","map-label");label.textContent=`${minY.toFixed(5)}, ${minX.toFixed(5)}  to  ${maxY.toFixed(5)}, ${maxX.toFixed(5)}  (lat, lon)`;svg.appendChild(label);
+    }
+    function renderCards(features, uncertain) {
+      const root=$("results");root.replaceChildren();
+      if(!features.length&&!uncertain.length){root.innerHTML='<div class="empty">No grounded detections satisfy every requested condition in this evidence bundle.</div>';return;}
+      for(const feature of features){
+        const p=feature.properties||{}, card=document.createElement("article");card.className="result";
+        const title=document.createElement("h3");title.textContent=`${p.visual_concept||"Object"} · ${p.id||p.detection_id||"match"}`;card.appendChild(title);
+        const meta=document.createElement("div");meta.className="meta";
+        const distance=(p.conditions||[]).find(c=>c.distance_m!==undefined)?.distance_m;
+        meta.textContent=`${distance===undefined?"Spatial relationship confirmed":`${distance} m to reference feature(s)`} · ${p.geometry_role||"geometry"} · imagery ${p.imagery_date||"date unknown"}`;card.appendChild(meta);
+        for(const condition of p.conditions||[]){const badge=document.createElement("span");badge.className="badge";badge.textContent=`${condition.condition}: ${condition.status}`;card.appendChild(badge);}
+        if(p.asset_url){const img=document.createElement("img");img.src=p.asset_url;img.alt="Original-resolution source tile for this result";img.loading="lazy";card.appendChild(img);}
+        root.appendChild(card);
+      }
+      for(const item of uncertain){const card=document.createElement("article");card.className="result";const title=document.createElement("h3");title.textContent="Needs review";const text=document.createElement("div");text.className="meta";text.textContent=escapeText(item.reason);card.append(title,text);root.appendChild(card);}
+    }
+    async function loadCapabilities(){
+      try{
+        const r=await fetch("/api/capabilities");if(!r.ok)throw new Error((await r.json()).detail||"Search data is not configured.");
+        const c=await r.json();$("status").textContent=`${c.area_name||"Configured area"} · ${c.coverage?.tile_count??"?"} tiles · dataset ${c.dataset_version}`;
+        $("foot").textContent="Results cover the frozen imagery and vector evidence shown above. A missing detection or map tag does not prove that a real-world feature is absent.";
+        const concepts=Object.entries(c.supported_concepts||{}), layers=Object.entries(c.vector_layers||{});
+        for(const [conceptId,details] of concepts.slice(0,3)) if(layers.length){
+          const label=details.aliases?.[0]||details.prompt||conceptId.replaceAll("_"," ");
+          const alias=layers[0][1].aliases?.[0]||layers[0][0].replaceAll("_"," ");
+          const chip=document.createElement("button");chip.className="chip";chip.type="button";chip.textContent=`${label} near ${alias}`;
+          chip.onclick=()=>{$("query").value=`Find ${label} within 200 metres of ${alias}`;$("query").focus();};$("examples").appendChild(chip);
+        }
+      }catch(err){$("status").className="status error";$("status").textContent=err.message;$("foot").textContent="Create and configure a real data bundle to enable search. No sample detections are fabricated.";}
+    }
+    $("searchForm").addEventListener("submit",async(event)=>{
+      event.preventDefault();const query=$("query").value.trim();if(!query)return;
+      const button=$("searchButton");button.disabled=true;button.textContent="Searching…";$("status").className="status";$("status").textContent="Parsing the request and checking cached evidence…";
+      try{
+        const response=await fetch("/api/query",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({query,previous_plan:previousPlan,mode:"catalog_scan",page:0,page_size:50})});
+        const data=await response.json();if(!response.ok)throw new Error(data.detail||"Search failed.");
+        lastResult=data;previousPlan=data.plan;renderMap(data.features||[],data.context_features||[]);renderCards(data.features||[],data.uncertain_candidates||[]);
+        $("resultsTitle").textContent=`${data.total_matches} matches · ${data.uncertain_candidates?.length||0} uncertain`;
+        $("mapTitle").textContent=`${data.tiles_processed} of ${data.tiles_available} tiles evaluated`;
+        $("download").hidden=!(data.features||[]).length;
+        $("status").textContent=`${data.claim_scope}${data.text_similarity_enabled?" Text-image ranking enabled.":" Text ranking unavailable; using precomputed concept detections."}`;
+      }catch(err){$("status").className="status error";$("status").textContent=err.message;}
+      finally{button.disabled=false;button.textContent="Search area";}
+    });
+    $("download").addEventListener("click",()=>{
+      if(!lastResult)return;const fc={type:"FeatureCollection",features:lastResult.features||[]};
+      const blob=new Blob([JSON.stringify(fc,null,2)],{type:"application/geo+json"}),url=URL.createObjectURL(blob),a=document.createElement("a");a.href=url;a.download="terralens-results.geojson";a.click();URL.revokeObjectURL(url);
+    });
+    loadCapabilities();
+  </script>
+</body>
+</html>
