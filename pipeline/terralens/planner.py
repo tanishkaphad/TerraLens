@@ -60,7 +60,7 @@ _NUMBER = r"-?\d+(?:\.\d+)?"
 _UNIT = r"kilometres?|kilometers?|km|metres?|meters?|m"
 _DISTANCE = re.compile(rf"(?<![\w.])({_NUMBER})\s*({_UNIT})\b", re.I)
 _PATCH = re.compile(
-    rf"\s*(?:(?:please\s+)?(?:make|change|set|increase|decrease)\s+(?:it|this|that|the\s+radius|radius|distance)\s*(?:to\s*)?|(?:use|try)\s+|(?:radius|distance)\s*(?:to|=)?\s*)"
+    rf"\s*(?:(?:please\s+)?(?:make|change|set|increase|decrease)\s+(?:it|this|that|(?:the\s+)?(?:radius|distance))\s*(?:to\s*)?|(?:use|try)\s+|(?:radius|distance)\s*(?:to|=)?\s*)"
     rf"({_NUMBER})\s*({_UNIT})(?:\s+instead)?[.!?]?\s*",
     re.I,
 )

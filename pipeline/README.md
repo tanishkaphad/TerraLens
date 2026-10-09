@@ -69,7 +69,7 @@ python scripts/run_demo.py
 python scripts/verify_demo.py
 ```
 
-Open `http://127.0.0.1:8000`. The launcher uses script-relative `data/demo` and converted SkyCLIP defaults. `BUNDLE_DIR` and `ENCODER_CHECKPOINT` can override them. `--host` and `--port` are supported. `/health` reports liveness; `/ready` loads and probes the matching encoder and distinguishes full capability from degraded cached spatial search.
+Open `http://127.0.0.1:8000`, or pass `--port 8010` when that port is occupied. The launcher uses `data/phoenix-demo` when prepared, then the SpaceNet sample (`spacenet-round1`, `spacenet-grounded`, `spacenet-urban`, `spacenet-sample`), falling back to `data/demo`, and the converted SkyCLIP checkpoint. The interface can switch between registered prepared datasets. `BUNDLE_DIR` and `ENCODER_CHECKPOINT` can override the defaults. `/health` reports liveness; `/ready` loads and probes the matching encoder and distinguishes full capability from degraded cached spatial search.
 
 The verification script records real API execution, counts, latency and complete exports under `data/validation/`. It is an integration check, **not** an annotated visual-accuracy benchmark. Run `pytest -q` for deterministic geometry/semantic tests.
 

@@ -6,6 +6,16 @@ The core flow is **question → validated query plan → visual evidence → geo
 
 ## Run the prototype
 
+The prepared local prototype includes a three-panel discovery workspace, dataset switching, natural-language search and radius follow-ups, image/vector controls, result evidence and complete GeoJSON export. It opens with sharper Phoenix NAIP imagery from September 2023 at 0.3 m per pixel; SpaceNet 1 Rio and Sacramento NAIP/OSM remain available. A continuous satellite or street basemap provides wider geographic context, with an expanded-map view. Dashed outlines identify the analysis imagery; searches use the prepared evidence inside that coverage.
+
+With the existing environment and prepared data, start it directly:
+
+```bash
+pipeline/.venv/bin/python pipeline/scripts/run_demo.py --port 8010
+```
+
+Open [the local prototype](http://127.0.0.1:8010). Try “Find swimming pools within 100 metres of roads”, then “Change the distance to 50 metres”. Five clickable examples are available for each study area. The Search mode works without a conversation API key. Conversation mode is enabled only when the backend provider is configured; configuration alone does not verify the provider connection.
+
 See [pipeline/README.md](pipeline/README.md) for source acquisition, local model preparation and startup. The service hosts its own interactive MapLibre interface and API. Imagery, vector snapshots, model weights and generated evidence bundles are stored outside Git under `pipeline/data/`.
 
 ```bash

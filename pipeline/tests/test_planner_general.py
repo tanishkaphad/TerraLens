@@ -161,13 +161,14 @@ def test_exact_vector_filters_and_multiple_and_relations(manifest):
     ]
 
 
-def test_radius_followup_changes_primary_only_and_preserves_every_other_clause(manifest):
+@pytest.mark.parametrize("message", ["make it 50 metres", "Change the distance to 50 metres", "Set the radius to 50 metres"])
+def test_radius_followup_changes_primary_only_and_preserves_every_other_clause(manifest, message):
     original = plan_query(
         "Find buildings with building=house within 100 metres of residential roads "
         "and within 300 metres of parks with public access",
         manifest,
     )
-    edited = plan_query("make it 50 metres", manifest, original.model_dump())
+    edited = plan_query(message, manifest, original.model_dump())
     assert edited.distance_m == 50
     assert edited.subject_layer == original.subject_layer
     assert edited.attributes == original.attributes

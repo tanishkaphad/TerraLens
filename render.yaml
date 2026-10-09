@@ -1,0 +1,39 @@
+services:
+  - type: web
+    name: geoverify-x
+    runtime: docker
+    plan: 2c-8g
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    numInstances: 1
+    maxShutdownDelaySeconds: 120
+    disk:
+      name: geoverify-evidence
+      mountPath: /app/pipeline/data
+      sizeGB: 5
+    envVars:
+      - key: BUNDLE_DIR
+        value: /app/pipeline/data/spacenet-grounded
+      - key: ENCODER_CHECKPOINT
+        value: /app/pipeline/data/models/SkyCLIP_ViT_B32_top50pct.safetensors
+      - key: GROUNDING_MODEL_PATH
+        value: /app/pipeline/data/models/owlv2-cfd3195ba4ea9592eec887ded089f4c08eff231d
+      - key: GROUNDING_DEVICE
+        value: cpu
+      - key: JOBS_DB
+        value: /app/pipeline/data/state/conversations.sqlite3
+      - key: HF_HUB_OFFLINE
+        value: "1"
+      - key: TRANSFORMERS_OFFLINE
+        value: "1"
+      - key: TOKENIZERS_PARALLELISM
+        value: "false"
+      - key: OMP_NUM_THREADS
+        value: "2"
+      - key: LLM_PROVIDER
+        value: gemini
+      - key: GEMINI_MODEL
+        value: gemini-3.7-flash
+      - key: GEMINI_API_KEY
+        sync: false

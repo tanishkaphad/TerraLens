@@ -11,6 +11,7 @@ from PIL import Image
 from shapely.geometry import LineString, box, mapping
 from terralens import api
 from terralens.bundle import Bundle, BundleError
+from terralens.discovery import discovery_plan
 from terralens.engine import condition_state, execute
 from terralens.planner import PlanError, _guard_interpretation, plan_query, validate_plan
 
@@ -242,3 +243,34 @@ def test_map_export_and_truthful_readiness(tmp_path, manifest):
         assert client.get("/api/export", params={"plan": "x" * 8193}).status_code == 422
     finally:
         api.get_bundle = old
+
+
+def test_capability_examples_preserve_evidence_type_and_dataset_radius(tmp_path, manifest, monkeypatch):
+    manifest["limits"] = {"maximum_distance_m": 5}
+    # A visual concept sharing the mapped layer name previously made the
+    # suggested vector example execute against detections instead.
+    manifest["supported_concepts"]["buildings"] = {
+        "prompt": "buildings", "aliases": ["buildings"], "association_layer": "buildings"
+    }
+    bundle = make_bundle(tmp_path, manifest)
+    monkeypatch.setattr(api, "_bundle", lambda dataset_id=None: bundle)
+    monkeypatch.setattr(bundle, "retrieval_status", lambda: {"enabled": True, "status": "ready"})
+    monkeypatch.setattr(api, "grounding_status", lambda value: {"available": False})
+    capabilities = api.capabilities()
+    kinds = {"mapped_feature": "vectors", "cached_model_detection": "objects", "image_similarity": "tiles"}
+    for task in capabilities["task_catalog"]:
+        plan, mode = discovery_plan(task["query"], manifest)
+        assert mode == task["mode"]
+        assert plan.query_type == kinds[task["evidence_kind"]]
+        assert plan.distance_m is None or plan.distance_m <= 5
+    assert any(task["evidence_kind"] == "image_similarity" for task in capabilities["task_catalog"])
+
+
+def test_capability_examples_skip_scene_search_when_encoder_is_unavailable(tmp_path, manifest, monkeypatch):
+    bundle = make_bundle(tmp_path, manifest)
+    monkeypatch.setattr(api, "_bundle", lambda dataset_id=None: bundle)
+    monkeypatch.setattr(bundle, "retrieval_status", lambda: {"enabled": False, "status": "checkpoint_not_configured"})
+    monkeypatch.setattr(api, "grounding_status", lambda value: {"available": False})
+    tasks = api.capabilities()["task_catalog"]
+    assert tasks
+    assert all(task["mode"] == "catalog_scan" for task in tasks)

@@ -1,67 +1,57 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f3f4ef">
-  <title>TerraLens | Find it in the landscape</title>
-  <link rel="stylesheet" href="/static/vendor/maplibre-gl.css">
-  <link rel="stylesheet" href="/static/app.css">
-  <script defer src="/static/vendor/maplibre-gl.js"></script>
-  <script defer src="/static/app.js"></script>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#f5f4ed">
+  <meta name="description" content="Explore aerial imagery and mapped infrastructure with natural language. TerraLens brings every finding back to its geographic evidence.">
+  <title>TerraLens — Explore with a question</title>
+  <link rel="stylesheet" href="/static/vendor/maplibre-gl.css"><link rel="stylesheet" href="/static/app.css">
+  <script defer src="/static/vendor/maplibre-gl.js"></script><script defer src="/static/app.js"></script>
 </head>
 <body>
-  <header class="topbar"><a class="brand" href="/">Terra<span>Lens</span></a><span class="tagline">Visual evidence. Geographic answers.</span><div id="datasetControl" class="dataset-control"><label for="datasetSelect">Dataset</label><select id="datasetSelect" aria-label="Evidence dataset"><option>Loading datasets</option></select></div><div id="area" class="area">Loading study area</div></header>
-  <main class="workspace">
-    <aside class="sidebar">
-      <section class="search-panel">
-        <div class="eyebrow">Multimodal geographic search</div>
-        <h1>Find it in<br>the landscape.</h1>
-        <p class="intro">Search prepared evidence, discover relevant imagery, or run a bounded object detector.</p>
-        <form id="searchForm">
-          <fieldset class="modes" aria-describedby="modeHelp modeAvailability">
-            <legend class="sr-only">Search mode</legend>
-            <label><input type="radio" name="mode" value="catalog_scan" checked><span>Prepared evidence</span></label>
-            <label id="exploreMode"><input type="radio" name="mode" value="explore"><span>Image discovery</span></label>
-            <label id="groundMode"><input type="radio" name="mode" value="ground"><span>Detect objects</span></label>
-          </fieldset>
-          <p id="modeHelp" class="hint">Search cached detections and supplied map records with spatial conditions.</p>
-          <p id="modeAvailability" class="availability" role="status" aria-live="polite" hidden></p>
-          <label id="queryLabel" class="field-label" for="query">Geographic question</label>
-          <textarea id="query" rows="3" minlength="3" maxlength="500" placeholder="Find swimming pools within 100 metres of roads" aria-describedby="modeHelp" required></textarea>
-          <div id="groundControls" class="ground-controls" hidden>
-            <label for="groundingTileLimit">Analyze top-ranked image tiles</label>
-            <select id="groundingTileLimit" aria-describedby="groundLimitHelp"><option value="1">1 tile</option><option value="2" selected>2 tiles</option><option value="3">3 tiles</option><option value="4">4 tiles</option></select>
-            <p id="groundLimitHelp">A smaller run is faster. Detection covers only these ranked tiles.</p>
-          </div>
-          <button id="searchButton" class="primary" type="submit"><span id="searchButtonLabel">Search prepared evidence</span><span class="arrow" aria-hidden="true">→</span></button>
-        </form>
-        <div class="example-section"><span id="examplesLabel" class="examples-label">Try a prepared-evidence query</span><div id="examples" class="examples" aria-labelledby="examplesLabel"></div></div>
-        <div id="status" class="status" role="status" aria-live="polite">Connecting to the evidence bundle…</div>
-        <div id="followup" class="followup" hidden><span>Follow-up context is active</span><button id="reset" type="button">Start fresh</button></div>
-        <section id="planPanel" class="plan-panel" aria-labelledby="planHeading" hidden>
-          <h2 id="planHeading">How TerraLens interpreted this</h2>
-          <dl id="planSummary" class="plan-summary"></dl>
-          <details><summary>View exact plan data</summary><pre id="plan"></pre></details>
+  <a class="skip-link" href="#query">Skip to search</a>
+  <main class="app-shell">
+    <aside class="app-rail" aria-label="Main navigation">
+      <a class="rail-brand" href="/" aria-label="TerraLens home"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 25 16 5l12 20H4Z"/><path d="m10 25 6-10 6 10M11 13h10"/></svg></a>
+      <nav class="rail-nav">
+        <button class="rail-button active" id="explorerNav" type="button" aria-label="Explore the map" title="Explore"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 6 6-3 6 3 6-3v15l-6 3-6-3-6 3V6Z"/><path d="M9 3v15M15 6v15"/></svg><span>Explore</span></button>
+        <button class="rail-button" id="sourcesNav" type="button" aria-label="View dataset sources" title="Sources"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m3 8 9-5 9 5-9 5-9-5ZM3 12l9 5 9-5M3 16l9 5 9-5"/></svg><span>Sources</span></button>
+      </nav>
+      <div class="rail-footer"><button class="rail-button" id="helpNav" type="button" aria-label="How to use TerraLens" title="Search guide"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 8.5a2.5 2.5 0 0 1 5 0c0 2-2.5 2-2.5 4M12 16h.01"/></svg><span>Guide</span></button><span class="rail-version">TL / 01</span></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar"><a class="brand" href="/" aria-label="TerraLens home">TerraLens<span class="brand-period">.</span></a><span class="topbar-label">THE GEOGRAPHIC DISCOVERY WORKSPACE</span><div class="header-actions"><span id="engineStatus" class="engine-status"><span></span>Loading evidence</span><span class="project-badge">GEOAI / 05</span></div></header>
+      <section class="intro-band" aria-labelledby="heroTitle">
+        <div class="page-heading"><p class="eyebrow"><span></span> A NEW PERSPECTIVE ON PLACE</p><h1 id="heroTitle">See the answer. <em>On the map.</em></h1><p class="page-description">Ask in everyday language. Explore real imagery. Follow the evidence.</p></div>
+        <div class="dataset-control"><label for="datasetSelect">YOUR STUDY AREA</label><div class="dataset-select-wrap"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 10c0 6-8 11-8 11S4 16 4 10a8 8 0 0 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/></svg><select id="datasetSelect" aria-label="Select study area" disabled><option>Loading study areas…</option></select></div><p><span id="datasetName">Evidence library</span> <span class="dataset-dot">·</span> <span id="areaName">Loading</span></p></div>
+      </section>
+      <section class="explorer-grid" aria-label="Geographic discovery workspace">
+        <section id="searchCluster" class="assistant-panel" aria-labelledby="searchHeading">
+          <div class="panel-heading"><span class="panel-kicker">DISCOVERY</span><span class="panel-number">01</span></div>
+          <div class="conversation-intro"><div class="assistant-mark"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 2.8 6.2L21 12l-6.2 2.8L12 21l-2.8-6.2L3 12l6.2-2.8L12 3Z"/></svg></div><h2 id="searchHeading">What are you<br>looking for?</h2><p>Find objects, explore places, or connect infrastructure with its surroundings.</p></div>
+          <div class="mode-tabs" role="group" aria-label="Search mode"><button id="expertMode" class="active" type="button" aria-pressed="true">Search</button><button id="conversationMode" type="button" aria-pressed="false" disabled>Conversation</button></div>
+          <div id="conversationThread" class="conversation-thread" role="log" aria-label="Search conversation" aria-live="polite"></div>
+          <div id="exampleSection" class="example-section"><p class="examples-label">A FEW PLACES TO START</p><div id="exampleList" class="example-list"><p class="examples-loading">Preparing questions for this study area…</p></div></div>
+          <form id="searchForm" class="composer" aria-label="Search geographic evidence"><label class="sr-only" for="query">Ask a geographic question</label><textarea id="query" name="query" minlength="3" maxlength="500" rows="3" autocomplete="off" spellcheck="true" placeholder="Find buildings near roads…" disabled required></textarea><div class="composer-actions"><span id="composerHint">Use a place, object or distance</span><button id="searchButton" type="submit" disabled aria-label="Search geographic evidence"><span id="buttonLoader" class="button-loader" aria-hidden="true"></span><span class="submit-label">Explore</span><svg class="submit-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h13M13 6l6 6-6 6"/></svg></button></div></form>
+          <div class="search-foot"><span id="searchStatus" class="search-status" role="status" aria-live="polite">Loading evidence</span></div>
+          <p class="console-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></svg>Every finding links back to its source.</p>
+        </section>
+        <section class="map-workspace" aria-label="Map and source layers">
+          <div class="map-toolbar"><div><span class="panel-kicker">THE LANDSCAPE</span><span id="mapAreaLabel" class="map-area-label">Study area</span></div><div class="map-full-controls"><div class="basemap-control" role="group" aria-label="Context basemap"><button id="satelliteBasemap" type="button" class="active" aria-pressed="true">Satellite</button><button id="streetBasemap" type="button" aria-pressed="false">Street</button></div><button id="expandMap" class="icon-button" type="button" aria-label="Expand map" title="Expand map" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H3v5M16 3h5v5M21 16v5h-5M3 16v5h5M3 3l6 6M21 3l-6 6M3 21l6-6M21 21l-6-6"/></svg></button></div><div class="layer-controls" aria-label="Map layers"><label class="toggle-label"><input id="imageryToggle" type="checkbox" checked><span></span>Analysis imagery</label><label class="toggle-label"><input id="vectorsToggle" type="checkbox" checked><span></span>Vectors</label></div></div>
+          <div class="map-stage"><div id="map" role="application" aria-label="Interactive aerial evidence map"></div><div id="mapLoading" class="map-loading"><div class="map-loading-mark"></div><span>Bringing the landscape into focus</span></div><div class="map-coordinate"><span id="mapCoordinates">SOURCE IMAGERY</span></div><button id="fitArea" class="fit-button" type="button" disabled title="Fit study area"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4H4v4M16 4h4v4M20 16v4h-4M4 16v4h4"/></svg><span>Fit area</span></button><div class="map-legend"><span class="legend-item"><i class="legend-reference"></i>Reference</span><span class="legend-item"><i class="legend-supported"></i>Supported</span><span class="legend-item"><i class="legend-review"></i>Review</span></div></div>
+          <div class="map-summary"><span id="mapMeta">LOCAL EVIDENCE LIBRARY</span><span id="mapScope">A bounded sample, with traceable sources.</span></div>
+        </section>
+        <section id="resultsPanel" class="results-panel" aria-labelledby="resultsTitle">
+          <header class="panel-head"><div><p class="panel-kicker">THE FINDINGS</p><h2 id="resultsTitle">Evidence, not guesses.</h2></div><div class="panel-actions"><button id="exportResults" class="icon-button" type="button" aria-label="Download all result evidence as GeoJSON" title="Export GeoJSON" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0 4-4m-4 4-4-4M5 18v2h14v-2"/></svg></button><button id="closeResults" class="icon-button" type="button" aria-label="Clear search results" title="Clear results" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button></div></header>
+          <div class="result-metrics" id="resultMetrics" aria-label="Result counts" hidden><div><strong id="candidateCount">0</strong><span id="candidateLabel">RESULTS</span></div><div><strong id="linkCount">0</strong><span id="linkLabel">SUPPORTED</span></div><div><strong id="unknownCount">0</strong><span id="unknownLabel">NEED REVIEW</span></div></div>
+          <div id="resultsEmpty" class="results-empty"><div class="empty-map-graphic" aria-hidden="true"><svg viewBox="0 0 180 150"><path d="m20 45 43-23 53 22 43-23v85l-43 23-53-22-43 23V45Z"/><path d="M63 22v85M116 44v85"/><circle cx="94" cy="65" r="17"/><path d="m106 78 18 20"/><path d="m35 63 14-8M131 47l14-8M77 109l22 9"/></svg></div><h3>The landscape is waiting.</h3><p>Your search results will appear here. Select a finding to inspect its location, source image and evidence checks.</p><div class="empty-evidence-label"><span></span>REAL IMAGERY. REAL COORDINATES.</div></div>
+          <div id="resultList" class="result-list" aria-live="polite"></div><p id="scopeNote" class="scope-note" hidden></p>
         </section>
       </section>
-      <section class="results-panel">
-        <div class="section-heading"><div><span class="eyebrow">Search results</span><h2 id="resultsTitle">Your evidence appears here</h2></div><button id="download" class="secondary" hidden>Export GeoJSON</button></div>
-        <p id="scope" class="scope"></p>
-        <p id="executionMeta" class="execution-meta" hidden></p>
-        <label id="exportOptions" class="export-options" hidden><input id="includeReview" type="checkbox"> Include candidates needing review in export</label>
-        <div id="results" aria-live="polite"><div class="empty"><div class="empty-shape" aria-hidden="true"></div><strong>A question becomes a place.</strong><p>Choose an evidence workflow, then select a result to inspect its source and spatial checks.</p></div></div>
-        <div id="pagination" class="pagination" hidden><button id="prevPage" type="button">Previous</button><span id="pageLabel" aria-live="polite"></span><button id="nextPage" type="button">Next</button></div>
-      </section>
-      <footer id="sourceNote" class="source-note">Results describe the loaded evidence. Missing detections or map tags do not establish real-world absence.</footer>
-    </aside>
-    <section class="map-panel" aria-label="Interactive map of the study area">
-      <div id="map"></div>
-      <div class="map-toolbar"><span class="map-heading">Study area</span><button id="fitArea" type="button">Fit area</button><details class="layer-picker"><summary>Layers</summary><div id="layers"><label><input type="checkbox" id="imageryToggle" checked> Aerial imagery</label></div></details></div>
-      <div class="map-legend"><span><i class="match"></i><span id="matchLegend">Matches</span></span><span><i class="review"></i>Needs review</span><span><i class="reference"></i>Related features</span></div>
-      <div id="mapNote" class="map-note">Loading local imagery and map features…</div>
-      <section id="evidence" class="evidence" hidden tabindex="-1" aria-labelledby="evidenceTitle"><button id="closeEvidence" class="close" aria-label="Close selected evidence">×</button><div id="evidenceBody"></div></section>
-    </section>
+      <footer class="workspace-footer"><span>BUILT FOR QUESTIONS THAT GO PLACES.</span><span>Open imagery <i>+</i> spatial evidence</span></footer>
+    </div>
+    <aside id="evidencePanel" class="evidence-panel" role="dialog" aria-modal="false" aria-labelledby="evidenceTitle" tabindex="-1" hidden><button id="closeEvidence" class="icon-button evidence-close" type="button" aria-label="Close evidence details"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button><div id="evidenceBody"></div></aside>
+    <aside id="sourcePanel" class="info-panel" role="dialog" aria-modal="true" aria-labelledby="sourceTitle" tabindex="-1" hidden><button id="closeSources" class="icon-button info-close" type="button" aria-label="Close dataset sources"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button><p class="panel-kicker">KNOW YOUR SOURCES</p><h2 id="sourceTitle">A place, in context.</h2><div id="sourceBody"></div></aside>
+    <aside id="helpPanel" class="info-panel" role="dialog" aria-modal="true" aria-labelledby="helpTitle" tabindex="-1" hidden><button id="closeHelp" class="icon-button info-close" type="button" aria-label="Close search guide"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg></button><p class="panel-kicker">A LITTLE GUIDANCE</p><h2 id="helpTitle">Start with a question.</h2><div class="guide-step"><span>01</span><div><h3>Choose your study area.</h3><p>Each library contains real aerial imagery and reference vectors for a small geographic sample.</p></div></div><div class="guide-step"><span>02</span><div><h3>Describe what you need.</h3><p>Try an example, then add a supported spatial relationship such as “within 20 metres of roads.” More complex questions require the configured conversation service.</p></div></div><div class="guide-step"><span>03</span><div><h3>Inspect the evidence.</h3><p>Select a result to see source imagery, coordinates, detection boxes and the checks behind the finding. Image similarity describes a scene; it does not prove an object exists.</p></div></div><div class="guide-step"><span>04</span><div><h3>Take your findings with you.</h3><p>Export the full run as GeoJSON, including source metadata and unresolved candidates. A sample does not establish complete geographic coverage.</p></div></div><p class="info-note">Shift + Enter adds a new line. Enter runs your search. Escape closes details.</p></aside>
   </main>
 </body>
 </html>

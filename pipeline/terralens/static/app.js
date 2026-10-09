@@ -1,779 +1,1058 @@
 "use strict";
 
-const $ = id => document.getElementById(id);
 const state = {
-  map: null, mapData: null, capabilities: null, datasets: [], datasetId: null,
-  previousPlan: null, groundingRunId: null, groundingThreshold: 0.1,
-  last: null, request: null, imagery: [], vectorIds: [], selected: null,
-  selectedControl: null, taskCatalog: [], loadSequence: 0, searchSequence: 0,
+  map: null,
+  mapData: null,
+  capabilities: null,
+  ready: false,
+  busy: false,
+  result: null,
+  records: [],
+  selectedId: null,
+  areaBounds: null,
+  imageryLayers: [],
+  searchController: null,
+  busyTimer: null,
+  busyIndex: 0,
+  datasets: [],
+  datasetId: null,
+  vectorLayers: [],
+  basemapMode: "satellite",
+  mode: "search",
+  assistant: null,
+  conversationId: null,
+  exportUrl: null,
+  infoTrigger: null,
 };
 
-const MODE_UI = {
-  catalog_scan: {
-    help: "Search cached detections and supplied map records with spatial conditions.",
-    placeholder: "Find swimming pools within 100 metres of roads",
-    label: "Geographic evidence question", button: "Search prepared evidence",
-    examples: "Try a prepared-evidence query",
-  },
-  explore: {
-    help: "Rank whole aerial images by scene similarity. Results do not identify or locate individual objects.",
-    placeholder: "Find tree-lined residential streets",
-    label: "Describe the scene to discover", button: "Discover images",
-    examples: "Try an image-discovery query",
-  },
-  ground: {
-    help: "Run a fresh object detector on a small number of top-ranked image tiles. This can take longer.",
-    placeholder: "Find trees within 100 metres of roads",
-    label: "Describe the objects to detect", button: "Detect in selected tiles",
-    examples: "Try an on-demand detection query",
-  },
-};
+const $ = id => document.getElementById(id);
+const collection = features => ({type: "FeatureCollection", features});
+const isCount = value => Number.isInteger(value) && value >= 0;
+const finite = value => Number.isFinite(Number(value));
+const displayNumber = value => finite(value) ? Number(value).toFixed(3) : "Not available";
+const pretty = value => String(value || "Unknown").replaceAll("_", " ").replace(/\b\w/g, character => character.toUpperCase());
+const safeClass = value => String(value || "unknown").toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
 
-const FALLBACK_TASKS = [
-  {query: "Find buildings with building=house within 100 metres of roads with highway=residential", mode: "catalog_scan", evidence_kind: "mapped_feature"},
-  {query: "Find swimming pools within 100 metres of roads", mode: "catalog_scan", evidence_kind: "prepared_model_detection"},
-  {query: "Find tree-lined residential streets", mode: "explore", evidence_kind: "image_tile"},
-  {query: "Find large parking lots beside commercial buildings", mode: "explore", evidence_kind: "image_tile"},
-  {query: "Find trees within 100 metres of roads", mode: "ground", evidence_kind: "live_model_detection"},
-];
-
-const fc = features => ({type: "FeatureCollection", features: features || []});
-const text = (tag, value, className) => {
+function node(tag, value = "", className = "") {
   const element = document.createElement(tag);
-  element.textContent = value ?? "Unknown";
   if (className) element.className = className;
+  if (value !== "") element.textContent = String(value);
   return element;
-};
-const nice = value => String(value || "Unknown").replaceAll("_", " ");
-const number = value => Number.isFinite(value) ? value.toFixed(3) : "Not available";
-const currentMode = () => document.querySelector('input[name="mode"]:checked')?.value || "catalog_scan";
-
-function status(message, error = false) {
-  $("status").textContent = message;
-  $("status").className = "status" + (error ? " error" : "");
-  $("status").setAttribute("role", error ? "alert" : "status");
 }
 
-async function request(url, body) {
-  const response = await fetch(url, body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
+async function requestJson(url, options = {}) {
+  const response = await fetch(url, options);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const detail = data.detail;
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail || "Request failed"));
+    const detail = typeof data.detail === "string" ? data.detail
+      : Array.isArray(data.detail) ? data.detail.slice(0, 2).map(item => `${item.loc?.slice(-1)?.[0] || "request"}: ${item.msg || "invalid value"}`).join("; ")
+        : data.detail?.message;
+    throw new Error(detail || `Request failed (${response.status}).`);
   }
   return data;
 }
 
-function datasetUrl(path) {
-  if (!state.datasetId) return path;
-  return `${path}${path.includes("?") ? "&" : "?"}dataset_id=${encodeURIComponent(state.datasetId)}`;
-}
-
-function boundsOf(features) {
-  const points = [];
-  function walk(value) {
-    if (typeof value?.[0] === "number") points.push(value);
-    else if (Array.isArray(value)) value.forEach(walk);
+function safeAssetUrl(value) {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    const url = new URL(value, window.location.origin);
+    if (url.origin !== window.location.origin || !url.pathname.startsWith("/api/assets/")) return null;
+    return url.href;
+  } catch (_) {
+    return null;
   }
-  features.forEach(feature => walk(feature.geometry?.coordinates));
-  return points.length ? points.reduce((bounds, point) => [
-    Math.min(bounds[0], point[0]), Math.min(bounds[1], point[1]),
-    Math.max(bounds[2], point[0]), Math.max(bounds[3], point[1]),
-  ], [180, 90, -180, -90]) : null;
 }
 
-function fit(bounds, padding = 60) {
-  if (bounds && state.map) state.map.fitBounds([[bounds[0], bounds[1]], [bounds[2], bounds[3]]], {padding, maxZoom: 18, duration: 650});
+function setStatus(message, type = "") {
+  $("searchStatus").textContent = message;
+  $("searchStatus").className = `search-status${type ? ` ${type}` : ""}`;
 }
 
-function source(id, features) {
-  state.map?.getSource(id)?.setData(fc(features));
+function setBusy(busy) {
+  state.busy = busy;
+  document.body.classList.toggle("is-searching", busy);
+  $("searchForm").setAttribute("aria-busy", String(busy));
+  $("query").readOnly = busy;
+  $("query").disabled = !state.ready;
+  $("datasetSelect").disabled = busy || !state.ready;
+  $("expertMode").disabled = busy;
+  $("conversationMode").disabled = busy || !state.assistant?.configured;
+  document.querySelectorAll(".example-query").forEach(button => { button.disabled = busy || !state.ready; });
+  updateSubmit();
 }
 
-function addGeometryLayers(sourceId, color, dashed = false) {
-  const map = state.map;
-  map.addSource(sourceId, {type: "geojson", data: fc([])});
-  map.addLayer({id: sourceId + "-fill", type: "fill", source: sourceId, filter: ["==", ["geometry-type"], "Polygon"], paint: {"fill-color": color, "fill-opacity": 0.2}});
-  map.addLayer({id: sourceId + "-line", type: "line", source: sourceId, paint: {"line-color": color, "line-width": 2, ...(dashed ? {"line-dasharray": [2, 2]} : {})}});
-  map.addLayer({id: sourceId + "-point", type: "circle", source: sourceId, filter: ["==", ["geometry-type"], "Point"], paint: {"circle-color": color, "circle-radius": 5, "circle-stroke-width": 1, "circle-stroke-color": "#fff"}});
+function startBusyStatus() {
+  const messages = ["Understanding the request", "Selecting bounded evidence", "Checking geographic evidence", "Preparing map results"];
+  state.busyIndex = 0;
+  setStatus(messages[0]);
+  window.clearInterval(state.busyTimer);
+  state.busyTimer = window.setInterval(() => {
+    state.busyIndex = Math.min(state.busyIndex + 1, messages.length - 1);
+    setStatus(messages[state.busyIndex]);
+  }, 3500);
 }
 
-function resetLayerPicker() {
-  const label = document.createElement("label");
-  const input = document.createElement("input");
-  input.type = "checkbox";
-  input.id = "imageryToggle";
-  input.checked = true;
-  label.append(input, document.createTextNode(" Aerial imagery"));
-  $("layers").replaceChildren(label);
+function stopBusyStatus() {
+  window.clearInterval(state.busyTimer);
+  state.busyTimer = null;
+}
+
+function updateSubmit() {
+  const valid = $("query").value.trim().length >= 3;
+  $("searchButton").disabled = !state.ready || state.busy || !valid;
+}
+
+function featureBounds(features) {
+  const points = [];
+  const walk = value => {
+    if (Array.isArray(value) && typeof value[0] === "number" && typeof value[1] === "number") points.push(value);
+    else if (Array.isArray(value)) value.forEach(walk);
+  };
+  for (const feature of features) walk(feature?.geometry?.coordinates);
+  if (!points.length) return null;
+  return points.reduce((bounds, point) => [
+    Math.min(bounds[0], point[0]),
+    Math.min(bounds[1], point[1]),
+    Math.max(bounds[2], point[0]),
+    Math.max(bounds[3], point[1]),
+  ], [180, 90, -180, -90]);
+}
+
+function outerRings(geometry) {
+  if (!geometry || !Array.isArray(geometry.coordinates)) return [];
+  if (geometry.type === "Polygon") return geometry.coordinates[0] ? [geometry.coordinates[0]] : [];
+  if (geometry.type === "MultiPolygon") return geometry.coordinates.map(polygon => polygon[0]).filter(Boolean);
+  return [];
+}
+
+function centroidOfGeometry(geometry) {
+  const rings = outerRings(geometry);
+  let best = null;
+  for (const ring of rings) {
+    if (!ring.length) continue;
+    const originX = Number(ring[0][0]);
+    const originY = Number(ring[0][1]);
+    let twiceArea = 0;
+    let longitude = 0;
+    let latitude = 0;
+    for (let index = 0; index < ring.length - 1; index += 1) {
+      const x1 = Number(ring[index][0]) - originX;
+      const y1 = Number(ring[index][1]) - originY;
+      const x2 = Number(ring[index + 1][0]) - originX;
+      const y2 = Number(ring[index + 1][1]) - originY;
+      const cross = x1 * y2 - x2 * y1;
+      twiceArea += cross;
+      longitude += (x1 + x2) * cross;
+      latitude += (y1 + y2) * cross;
+    }
+    if (Math.abs(twiceArea) < 1e-14) continue;
+    const candidate = {area: Math.abs(twiceArea), coordinates: [originX + longitude / (3 * twiceArea), originY + latitude / (3 * twiceArea)]};
+    if (!best || candidate.area > best.area) best = candidate;
+  }
+  if (best) return best.coordinates;
+  const bounds = featureBounds([{geometry}]);
+  return bounds ? [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2] : null;
+}
+
+function observationGeometry(feature) {
+  const geometries = Array.isArray(feature.properties?.evidence_geometries) ? feature.properties.evidence_geometries : [];
+  return geometries.find(item => item?.properties?.role === "visual_detection")?.geometry || geometries.find(item => item?.geometry)?.geometry || feature.geometry;
+}
+
+function executionMode(data) {
+  if (data?.execution_mode) return data.execution_mode;
+  if (data?.mode) return data.mode;
+  if (data?.result_kind === "tile_retrieval") return "explore";
+  return "catalog_scan";
+}
+
+function resultProfile(data, feature = null) {
+  const kind = String(feature?.properties?.evidence_kind || data?.evidence_kind || "").toLowerCase();
+  const resultKind = String(data?.result_kind || "").toLowerCase();
+  if (resultKind === "tile_retrieval" || executionMode(data) === "explore" || ["image_tile", "image_similarity", "tile_retrieval"].includes(kind)) return "scene";
+  if (["vector_features", "mapped_features", "mapped_records"].includes(resultKind) || kind === "mapped_feature") return "mapped";
+  if (executionMode(data) === "ground" || kind === "live_model_detection") return "live";
+  return "cached";
+}
+
+function resultItems(data) {
+  return resultProfile(data) === "scene"
+    ? (Array.isArray(data.tile_candidates) ? data.tile_candidates : [])
+    : (Array.isArray(data.features) ? data.features : []);
+}
+
+function conceptName(data, feature) {
+  const properties = feature?.properties || {};
+  return properties.display_name || properties.name || properties.visual_concept || properties.concept_id || data?.plan?.visual_query || data?.plan?.concept_id || null;
+}
+
+function fitBounds(bounds, focused = false) {
+  if (!state.map || !bounds) return;
+  const size = state.map.getContainer().getBoundingClientRect();
+  const padding = Math.max(20, Math.min(65, size.width * .08, size.height * .08));
+  state.map.fitBounds([[bounds[0], bounds[1]], [bounds[2], bounds[3]]], {padding, maxZoom: focused ? 19 : 17, duration: 750});
+}
+
+function sourceData(id, features) {
+  state.map?.getSource(id)?.setData(collection(features));
+}
+
+function mapId(value) {
+  return String(value).replace(/[^a-zA-Z0-9_-]/g, "-");
+}
+
+function areaLabel(value) {
+  const label = String(value || "");
+  if (/\brio\b/i.test(label)) return "RIO";
+  if (/\bsacramento\b/i.test(label)) return "SACRAMENTO";
+  if (/\bphoenix\b/i.test(label)) return "PHOENIX";
+  return label || "STUDY AREA";
+}
+
+function datasetDetail(datasetId = state.datasetId) {
+  return state.datasets.find(dataset => dataset.id === datasetId) || null;
+}
+
+function renderDatasetIdentity(datasetId, areaName = null) {
+  const detail = datasetDetail(datasetId);
+  $("datasetName").textContent = detail?.source || detail?.name || datasetId || "LOCAL EVIDENCE";
+  if (areaName || detail?.name) $("areaName").textContent = areaLabel(areaName || detail.name);
+  $("mapAreaLabel").textContent = areaName || detail?.name || "Study area";
+}
+
+function setImageryFocus(active) {
+  for (const id of state.imageryLayers) {
+    if (state.map?.getLayer(id)) state.map.setPaintProperty(id, "raster-opacity", .95);
+  }
 }
 
 function destroyMap() {
   if (state.map) state.map.remove();
   state.map = null;
   state.mapData = null;
-  state.imagery = [];
-  state.vectorIds = [];
-  resetLayerPicker();
+  state.areaBounds = null;
+  state.imageryLayers = [];
+  state.vectorLayers = [];
 }
 
-async function loadMap() {
-  if (!window.maplibregl) throw new Error("The local map renderer is missing. Run the asset download step.");
-  const data = await request(datasetUrl("/api/map?tile_limit=64&vector_limit=5000"));
+function addPolygonLayers(sourceId, prefix, colors, options = {}) {
+  state.map.addSource(sourceId, {type: "geojson", data: collection([])});
+  state.map.addLayer({
+    id: `${prefix}-fill`, type: "fill", source: sourceId,
+    paint: {"fill-color": colors.fill, "fill-opacity": options.opacity ?? .18},
+  });
+  state.map.addLayer({id: `${prefix}-point`, type: "circle", source: sourceId,
+    filter: ["in", ["geometry-type"], ["literal", ["Point", "MultiPoint"]]],
+    paint: {"circle-color": colors.fill, "circle-radius": 6, "circle-stroke-color": colors.line, "circle-stroke-width": 2}});
+  state.map.addLayer({
+    id: `${prefix}-line`, type: "line", source: sourceId,
+    paint: {"line-color": colors.line, "line-width": options.width ?? 1.8, "line-opacity": options.lineOpacity ?? .9,
+      ...(options.dash ? {"line-dasharray": options.dash} : {})},
+  });
+}
+
+function addResultSources() {
+  addPolygonLayers("context-results", "context-results", {fill: "#508d94", line: "#c2efef"}, {opacity: .09, width: 2, lineOpacity: .76});
+  addPolygonLayers("scene-results", "scene-results", {fill: "#317582", line: "#a2f1e6"}, {opacity: .1, width: 2});
+  addPolygonLayers("linked-results", "linked-results", {fill: "#489968", line: "#b6f5bd"}, {opacity: .23, width: 2.2});
+  addPolygonLayers("linked-observations", "linked-observations", {fill: "#8de9bc", line: "#e5f9d7"}, {opacity: .06, width: 1.5, dash: [2, 1.6]});
+  addPolygonLayers("review-results", "review-results", {fill: "#e4b361", line: "#ffc875"}, {opacity: .13, width: 1.7, dash: [2.4, 1.6]});
+  addPolygonLayers("selected-result", "selected-result", {fill: "#fcfbeb", line: "#fcfbeb"}, {opacity: .1, width: 3});
+
+  for (const layerId of ["scene-results-fill", "linked-results-fill", "review-results-fill"]) {
+    state.map.on("click", layerId, event => {
+      const id = event.features?.[0]?.properties?._ui_id;
+      if (id) selectRecord(id, {moveMap: false});
+    });
+    state.map.on("mouseenter", layerId, () => { state.map.getCanvas().style.cursor = "pointer"; });
+    state.map.on("mouseleave", layerId, () => { state.map.getCanvas().style.cursor = ""; });
+  }
+}
+
+async function loadMap(datasetId) {
+  if (!window.maplibregl) throw new Error("The local map renderer is unavailable.");
+  const data = await requestJson(`/api/map?dataset_id=${encodeURIComponent(datasetId)}&tile_limit=64&vector_limit=5000`);
+  $("mapLoading").hidden = false;
+  destroyMap();
   state.mapData = data;
-  const attribution = Object.values(data.attribution || {}).filter(value => typeof value === "string").join(" · ");
+  state.areaBounds = featureBounds(data.tiles || []) || (Array.isArray(data.coverage?.bbox_wgs84) ? data.coverage.bbox_wgs84 : null);
+
+  const attribution = [...new Set(Object.values(data.attribution || {}).filter(value => typeof value === "string"))].join(" · ");
   const map = state.map = new maplibregl.Map({
     container: "map",
-    style: {version: 8, sources: {}, layers: [{id: "background", type: "background", paint: {"background-color": "#dfe5d7"}}]},
-    center: [0, 0], zoom: 1, attributionControl: false,
+    center: [-43.711, -22.902],
+    zoom: 15,
+    attributionControl: false,
+    style: {version: 8, sources: {}, layers: [{id: "background", type: "background", paint: {"background-color": "#e5e9e1"}}]},
   });
-  map.addControl(new maplibregl.NavigationControl({showCompass: false}), "top-right");
-  map.addControl(new maplibregl.ScaleControl({unit: "metric"}), "bottom-left");
-  map.addControl(new maplibregl.AttributionControl({customAttribution: attribution, compact: true}), "bottom-right");
-  await new Promise(resolve => map.on("load", resolve));
+  map.addControl(new maplibregl.NavigationControl({showCompass: false, visualizePitch: false}), "bottom-right");
+  map.addControl(new maplibregl.ScaleControl({unit: "metric", maxWidth: 90}), "bottom-left");
+  map.addControl(new maplibregl.AttributionControl({compact: true, customAttribution: attribution}), "bottom-right");
+  await new Promise(resolve => map.once("load", resolve));
 
-  for (const tile of data.tiles || []) {
-    if (!tile.coordinates || tile.coordinates.length !== 4) continue;
-    const id = "image-" + tile.tile_id;
+  map.addSource("satellite-basemap", {type: "raster", tiles: ["https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"], tileSize: 256, maxzoom: 19,
+    attribution: "Sources: Esri, Maxar, Earthstar Geographics, GIS User Community"});
+  map.addLayer({id: "satellite-basemap", type: "raster", source: "satellite-basemap", paint: {"raster-fade-duration": 150}});
+  map.addSource("street-basemap", {type: "raster", tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], tileSize: 256, maxzoom: 19,
+    attribution: "© OpenStreetMap contributors"});
+  map.addLayer({id: "street-basemap", type: "raster", source: "street-basemap", layout: {visibility: "none"}, paint: {"raster-fade-duration": 150}});
+  setBasemap(state.basemapMode);
+
+  for (const [index, tile] of (data.tiles || []).entries()) {
+    if (!Array.isArray(tile.coordinates) || tile.coordinates.length !== 4) continue;
+    const id = `imagery-${mapId(tile.tile_id || index)}`;
     map.addSource(id, {type: "image", url: tile.asset_url, coordinates: tile.coordinates});
-    map.addLayer({id, type: "raster", source: id, paint: {"raster-fade-duration": 0}});
-    state.imagery.push(id);
+    map.addLayer({
+      id, type: "raster", source: id,
+      paint: {"raster-opacity": .95, "raster-saturation": -.08, "raster-contrast": .03, "raster-brightness-min": .02, "raster-brightness-max": 1, "raster-fade-duration": 0},
+    });
+    state.imageryLayers.push(id);
   }
 
-  const colors = {roads: "#efdcb0", buildings: "#f6faf0", drains: "#72b8dd", waterways: "#72b8dd"};
-  for (const [name, collection] of Object.entries(data.vector_layers || {})) {
-    const id = "base-" + name;
-    map.addSource(id, {type: "geojson", data: collection});
-    map.addLayer({id, type: "line", source: id, paint: {"line-color": colors[name] || "#e9eac4", "line-width": name === "buildings" ? 1 : 1.6, "line-opacity": 0.72}});
-    state.vectorIds.push(id);
-    const label = document.createElement("label");
-    const input = document.createElement("input");
-    input.type = "checkbox";
-    input.checked = true;
-    input.addEventListener("change", () => map.setLayoutProperty(id, "visibility", input.checked ? "visible" : "none"));
-    label.append(input, document.createTextNode(" " + nice(name)));
-    $("layers").append(label);
+  for (const [layerName, layer] of Object.entries(data.vector_layers || {})) {
+    const sourceId = `reference-${mapId(layerName)}`;
+    map.addSource(sourceId, {type: "geojson", data: layer});
+    map.addLayer({id: `${sourceId}-fill`, type: "fill", source: sourceId,
+      paint: {"fill-color": "#4c929a", "fill-opacity": .06}});
+    map.addLayer({id: `${sourceId}-line`, type: "line", source: sourceId,
+      paint: {"line-color": "#a6e4e9", "line-width": 1, "line-opacity": .58}});
+    state.vectorLayers.push(`${sourceId}-fill`, `${sourceId}-line`);
   }
 
-  addGeometryLayers("matches", "#75d480");
-  addGeometryLayers("uncertain", "#edbd52", true);
-  addGeometryLayers("context", "#65bcee");
-  addGeometryLayers("observations", "#ffad51", true);
-  addGeometryLayers("selection", "#f5f76c");
-  for (const layer of ["matches", "uncertain"]) {
-    for (const suffix of ["-fill", "-line", "-point"]) {
-      const id = layer + suffix;
-      map.on("click", id, event => {
-        const identifier = event.features?.[0]?.id ?? event.features?.[0]?.properties?.id;
-        const all = [...(state.last?.features || []), ...(state.last?.tile_candidates || []), ...(state.last?.uncertain_candidates || [])];
-        const feature = all.find(item => String(featureKey(item)) === String(identifier));
-        if (feature) selectFeature(feature);
-      });
-      map.on("mouseenter", id, () => { map.getCanvas().style.cursor = "pointer"; });
-      map.on("mouseleave", id, () => { map.getCanvas().style.cursor = ""; });
-    }
-  }
+  map.addSource("study-boundary", {type: "geojson", data: collection((data.tiles || []).filter(tile => tile.geometry).map(tile => ({type: "Feature", geometry: tile.geometry, properties: {tile_id: tile.tile_id}})))});
+  map.addLayer({id: "study-boundary", type: "line", source: "study-boundary", paint: {"line-color": "#f6eabf", "line-width": 2, "line-opacity": .85, "line-dasharray": [3, 2]}});
 
-  $("imageryToggle").addEventListener("change", () => state.imagery.forEach(id => map.setLayoutProperty(id, "visibility", $("imageryToggle").checked ? "visible" : "none")));
-  $("fitArea").onclick = () => fit(data.coverage?.bbox_wgs84 || boundsOf(data.tiles || []));
-  fit(data.coverage?.bbox_wgs84 || boundsOf(data.tiles || []), 50);
-  const counts = data.counts?.tiles || {};
-  const truncated = counts.truncated || Object.values(data.counts?.vector_layers || {}).some(count => count.truncated);
-  $("mapNote").textContent = `${(data.tiles || []).length} aerial tiles · ${data.coverage?.acquisition_dates?.join(", ") || "acquisition date unknown"}${truncated ? " · map display is limited" : ""}. Study evidence may differ from conditions today.`;
-  if (state.last) renderResults(state.last);
+  addResultSources();
+  applyLayerVisibility();
+  fitBounds(state.areaBounds);
+  map.on("mousemove", event => { $("mapCoordinates").textContent = `${Math.abs(event.lngLat.lat).toFixed(5)}° ${event.lngLat.lat < 0 ? "S" : "N"}  /  ${Math.abs(event.lngLat.lng).toFixed(5)}° ${event.lngLat.lng < 0 ? "W" : "E"}`; });
+  map.once("idle", () => { $("mapLoading").hidden = true; });
+  map.on("sourcedata", event => { if (event.sourceId?.startsWith("imagery-") && event.isSourceLoaded) $("mapLoading").hidden = true; });
+  $("fitArea").disabled = false;
+  const tileCount = data.counts?.tiles?.available ?? data.tiles?.length ?? 0;
+  const footprintCount = data.counts?.vector_layers?.buildings?.available;
+  $("mapMeta").textContent = `${tileCount} SOURCE ${tileCount === 1 ? "TILE" : "TILES"}${isCount(footprintCount) ? ` · ${footprintCount} REFERENCE FOOTPRINTS` : ""}`;
+  $("mapScope").textContent = "Basemap for context · search covers analysis imagery";
+  renderDatasetIdentity(datasetId, data.area_name);
 }
 
-function normalizeMode(value, evidenceKind) {
-  const mode = String(value || "").toLowerCase();
-  const kind = String(evidenceKind || "").toLowerCase();
-  if (["ground", "detect", "detection", "live_grounding"].includes(mode) || kind === "live_model_detection") return "ground";
-  if (["explore", "image", "imagery", "tile"].includes(mode) || ["image_tile", "tile_retrieval"].includes(kind)) return "explore";
-  return "catalog_scan";
-}
-
-function normalizeTaskCatalog(raw) {
-  if (!Array.isArray(raw)) return [];
-  return raw.flatMap(item => {
-    if (typeof item === "string") return [{query: item, mode: "catalog_scan", evidence_kind: "prepared_evidence"}];
-    const queries = Array.isArray(item.examples) ? item.examples : [item.query || item.example];
-    return queries.filter(Boolean).map(query => ({query: String(query), label: item.label ? String(item.label) : null, mode: normalizeMode(item.mode, item.evidence_kind), evidence_kind: item.evidence_kind || null}));
-  });
-}
-
-function reasonText(value) {
-  if (!value) return "required local model assets are not ready";
-  if (typeof value === "string") return nice(value);
-  if (Array.isArray(value)) return value.map(reasonText).join("; ");
-  return value.reason || value.message || JSON.stringify(value);
-}
-
-function configureGrounding(c) {
-  const grounding = c.grounding || {};
-  const available = c.live_grounding === true;
-  const modeInput = document.querySelector('input[name="mode"][value="ground"]');
-  modeInput.dataset.capDisabled = String(!available);
-  modeInput.disabled = !available;
-  $("groundMode").classList.toggle("unavailable", !available);
-  const maximum = Math.max(1, Math.min(4, Number(grounding.max_tiles || c.ground_limit || 4)));
-  const select = $("groundingTileLimit");
-  const selected = Math.min(maximum, Number(select.value) || 2);
-  select.replaceChildren();
-  for (let count = 1; count <= maximum; count += 1) {
-    const option = document.createElement("option");
-    option.value = String(count);
-    option.textContent = `${count} ${count === 1 ? "tile" : "tiles"}`;
-    option.selected = count === selected;
-    select.append(option);
-  }
-  $("groundLimitHelp").textContent = `A smaller run is faster. Detection covers only these ranked tiles; this dataset allows up to ${maximum}.`;
-  return available ? null : `Detect objects is unavailable for this dataset: ${reasonText(grounding.reason || c.retrieval?.reason || c.retrieval?.error || c.retrieval?.status || c.unavailable_reasons?.ground)}.`;
-}
-
-function configureExploration(c) {
-  const available = c.text_similarity_enabled !== false;
-  const modeInput = document.querySelector('input[name="mode"][value="explore"]');
-  modeInput.dataset.capDisabled = String(!available);
-  modeInput.disabled = !available;
-  $("exploreMode").classList.toggle("unavailable", !available);
-  return available ? null : `Image discovery is unavailable for this dataset: ${reasonText(c.retrieval?.reason || c.retrieval?.error || c.retrieval?.status || c.unavailable_reasons?.explore)}.`;
-}
-
-async function loadCapabilities() {
-  const c = state.capabilities = await request(datasetUrl("/api/capabilities"));
-  $("area").textContent = c.area_name || "Configured study area";
-  state.taskCatalog = normalizeTaskCatalog(c.task_catalog);
-  const notices = [configureGrounding(c), configureExploration(c)].filter(Boolean);
-  $("modeAvailability").hidden = notices.length === 0;
-  $("modeAvailability").textContent = notices.join(" ");
-  if (document.querySelector('input[name="mode"]:checked')?.disabled) document.querySelector('input[name="mode"][value="catalog_scan"]').checked = true;
-  updateModeUi(currentMode());
-  return c;
+async function loadCapabilities(datasetId) {
+  const data = await requestJson(`/api/capabilities?dataset_id=${encodeURIComponent(datasetId)}`);
+  state.capabilities = data;
+  renderExamples(data);
+  state.assistant = data.conversation || state.assistant;
+  $("conversationMode").disabled = !state.assistant?.configured;
+  $("conversationMode").title = state.assistant?.configured ? "Ask questions and follow up through the configured conversation service" : "Conversation service is not configured. Evidence search is available.";
+  if (data.area_name) renderDatasetIdentity(datasetId, data.area_name);
 }
 
 async function loadDatasets() {
-  let payload;
-  try {
-    payload = await request("/api/datasets");
-  } catch (error) {
-    payload = {datasets: [{id: "", name: "Configured dataset", default: true}], default_dataset_id: ""};
-  }
-  const datasets = Array.isArray(payload.datasets) && payload.datasets.length ? payload.datasets : [{id: "", name: "Configured dataset", default: true}];
-  state.datasets = datasets;
+  const payload = await requestJson("/api/datasets");
+  state.datasets = Array.isArray(payload.datasets) ? payload.datasets : [];
+  if (!state.datasets.length) throw new Error("No prepared evidence datasets are available.");
   const select = $("datasetSelect");
   select.replaceChildren();
-  for (const dataset of datasets) {
-    const option = document.createElement("option");
-    option.value = dataset.id || "";
-    option.textContent = dataset.name || dataset.id || "Configured dataset";
-    option.title = dataset.source || "";
-    select.append(option);
-  }
-  const fallback = datasets.find(dataset => dataset.default)?.id ?? datasets[0]?.id ?? "";
-  state.datasetId = payload.default_dataset_id ?? fallback;
-  select.value = state.datasetId || "";
-  $("datasetControl").hidden = false;
-}
-
-function capabilityStatus(c) {
-  const messages = [`${c.coverage?.tile_count ?? "?"} prepared tiles loaded.`];
-  if (c.text_similarity_enabled) messages.push("Image discovery is ready.");
-  if (c.live_grounding) {
-    const loaded = ["ready", "loaded"].includes(c.grounding?.status);
-    messages.push(loaded ? "Bounded on-demand detection is loaded." : "Bounded on-demand detection is configured; its local model loads on the first run.");
-  }
-  return messages.join(" ");
+  state.datasets.forEach(dataset => { const option = node("option", dataset.name || dataset.id); option.value = dataset.id; select.append(option); });
+  const requested = payload.default_dataset_id;
+  return state.datasets.some(dataset => dataset.id === requested) ? requested : state.datasets.find(dataset => dataset.default)?.id || state.datasets[0].id;
 }
 
 async function loadDataset(datasetId) {
-  const sequence = ++state.loadSequence;
-  state.searchSequence += 1;
-  state.datasetId = datasetId || null;
-  $("datasetSelect").disabled = true;
-  resetSearchState({clearQuery: true});
-  destroyMap();
-  $("area").textContent = "Loading study area";
-  $("mapNote").textContent = "Loading local imagery and map features…";
-  status("Loading the selected dataset and its capabilities…");
-  const checks = await Promise.allSettled([loadCapabilities(), loadMap()]);
-  if (sequence !== state.loadSequence) return;
-  $("datasetSelect").disabled = false;
-  const failures = checks.filter(result => result.status === "rejected");
-  if (failures.length) {
-    status(failures.map(result => result.reason.message).join(" "), true);
-    if (checks[1].status === "rejected") $("mapNote").textContent = "A real, prepared evidence bundle is required to display this dataset.";
-  } else status(capabilityStatus(checks[0].value));
+  if (!datasetId) throw new Error("The selected evidence source is unavailable.");
+  if (state.datasetId === datasetId && state.map && state.capabilities) return;
+  await Promise.all([loadCapabilities(datasetId), loadMap(datasetId)]);
+  state.datasetId = datasetId;
+  $("datasetSelect").value = datasetId;
+  renderDatasetIdentity(datasetId, state.mapData?.area_name || state.capabilities?.area_name);
+  renderSources();
 }
 
-function modeTasks(mode) {
-  const configured = state.taskCatalog.filter(task => task.mode === mode);
-  const fallback = FALLBACK_TASKS.filter(task => task.mode === mode);
-  const seen = new Set();
-  return (configured.length ? configured : fallback).filter(task => {
-    const key = task.query.toLowerCase();
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  }).slice(0, 3);
+function cloneForMap(feature, id, bucket) {
+  return {
+    ...feature,
+    properties: {...(feature.properties || {}), _ui_id: id, _ui_bucket: bucket},
+  };
 }
 
-function clearConversationContext() {
-  state.previousPlan = null;
-  state.groundingRunId = null;
-  $("followup").hidden = true;
+function observationGeometries(feature, id) {
+  const evidence = Array.isArray(feature.properties?.evidence_geometries) ? feature.properties.evidence_geometries : [];
+  return evidence.filter(item => item?.geometry).map(item => cloneForMap(item, id, "observation"));
 }
 
-function renderExamples(mode) {
-  $("examples").replaceChildren();
-  for (const task of modeTasks(mode)) {
-    const button = text("button", task.label || task.query, "example");
-    button.type = "button";
-    button.dataset.evidenceKind = task.evidence_kind || "";
-    button.addEventListener("click", () => {
-      clearConversationContext();
-      $("query").value = task.query;
-      $("query").focus();
-    });
-    $("examples").append(button);
-  }
+function normalizeResults(data) {
+  const profile = resultProfile(data);
+  const linked = resultItems(data);
+  const review = Array.isArray(data.uncertain_candidates) ? data.uncertain_candidates : [];
+  state.records = [
+    ...linked.map((feature, index) => ({id: `${profile}-${index}`, feature, supported: profile !== "scene", profile: resultProfile(data, feature), index})),
+    ...review.map((feature, index) => ({id: `review-${index}`, feature, supported: false, profile: resultProfile(data, feature), index: linked.length + index})),
+  ];
+  return {linked, review, profile};
 }
 
-function updateModeUi(mode) {
-  const ui = MODE_UI[mode] || MODE_UI.catalog_scan;
-  $("modeHelp").textContent = ui.help;
-  $("query").placeholder = modeTasks(mode)[0]?.query || ui.placeholder;
-  $("queryLabel").textContent = ui.label;
-  $("searchButtonLabel").textContent = ui.button;
-  $("examplesLabel").textContent = ui.examples;
-  $("groundControls").hidden = mode !== "ground";
-  renderExamples(mode);
-}
+function displayResults(data, query) {
+  const {linked, review, profile} = normalizeResults(data);
+  const linkedCount = profile === "scene"
+    ? (isCount(data.total_tile_candidates) ? data.total_tile_candidates : linked.length)
+    : (isCount(data.total_matches) ? data.total_matches : linked.length);
+  const reviewCount = profile === "scene" ? 0 : (isCount(data.total_uncertain) ? data.total_uncertain : review.length);
+  const candidateCount = linkedCount + reviewCount;
+  const footprintLinks = state.records.filter(record => record.feature.properties?.association === "unique").length;
 
-function emptyMessage(profile) {
-  if (profile === "tile") return "No image candidates were returned for this scene description.";
-  if (profile === "mapped") return "No supplied map records satisfy every condition. This does not establish real-world absence or map completeness.";
-  if (profile === "live") return "No detector observations passed the threshold in the analyzed tiles. The bounded run does not establish absence across the full study area.";
-  return "No prepared detections satisfy every condition. This does not establish real-world absence.";
-}
+  $("candidateCount").textContent = String(candidateCount);
+  $("candidateLabel").textContent = profile === "scene" ? "IMAGE SCENES" : profile === "mapped" ? "MAPPED RECORDS" : profile === "live" ? "MODEL OBSERVATIONS" : "AI CANDIDATES";
+  $("linkCount").textContent = String(profile === "scene" ? (data.tiles_processed ?? linked.length) : profile === "cached" ? footprintLinks : linkedCount);
+  $("linkLabel").textContent = profile === "scene" ? "TILES SEARCHED" : profile === "cached" ? "FOOTPRINT LINKS" : "SUPPORTED";
+  $("unknownCount").textContent = String(reviewCount);
+  $("unknownLabel").textContent = profile === "scene" ? "OBJECT CLAIMS" : "NEED REVIEW";
+  $("resultsTitle").textContent = query;
+  const scope = data.claim_scope || "Prepared evidence from the selected dataset; no completeness claim.";
+  const returnedCount = linked.length + review.length;
+  $("scopeNote").textContent = `${scope}${candidateCount > returnedCount ? ` Showing ${returnedCount} of ${candidateCount} returned records.` : ""}`;
+  $("exportResults").disabled = !data.plan && !state.exportUrl;
+  $("resultsEmpty").hidden = true;
+  $("resultMetrics").hidden = false;
+  $("closeResults").hidden = false;
+  $("scopeNote").hidden = false;
 
-function showEmpty(message = "Choose a workflow and enter a question to inspect geographic evidence.") {
-  const root = text("div", "", "empty");
-  const shape = text("div", "", "empty-shape");
-  shape.setAttribute("aria-hidden", "true");
-  root.append(shape, text("strong", "A question becomes a place."), text("p", message));
-  $("results").replaceChildren(root);
-}
-
-function clearResultSources() {
-  for (const id of ["matches", "uncertain", "context", "selection", "observations"]) source(id, []);
-}
-
-function resetSearchState({clearQuery = false} = {}) {
-  clearConversationContext();
-  state.last = null;
-  state.request = null;
-  state.selected = null;
-  if (clearQuery) $("query").value = "";
-  $("planPanel").hidden = true;
-  $("download").hidden = true;
-  $("exportOptions").hidden = true;
-  $("includeReview").checked = false;
-  $("pagination").hidden = true;
-  $("scope").textContent = "";
-  $("executionMeta").hidden = true;
-  $("executionMeta").textContent = "";
-  $("resultsTitle").textContent = "Your evidence appears here";
-  $("evidence").hidden = true;
-  clearResultSources();
-  showEmpty();
-}
-
-function featureKey(feature) {
-  const properties = feature?.properties || {};
-  return feature?.id ?? properties.id ?? properties.detection_id ?? properties.tile_id;
-}
-
-function evidenceKind(feature, data = state.last) {
-  const properties = feature?.properties || {};
-  const declared = properties.evidence_kind || properties.evidence_type;
-  if (declared) return declared;
-  if (data?.result_kind === "tile_retrieval") return "image_tile";
-  if (data?.mode === "ground" || state.request?.mode === "ground") return "live_model_detection";
-  if (["mapped_features", "vector_features", "mapped_records"].includes(data?.result_kind)) return "mapped_feature";
-  return "prepared_model_detection";
-}
-
-function resultProfile(data, features = []) {
-  if (data.result_kind === "tile_retrieval") return "tile";
-  const kinds = new Set(features.map(feature => evidenceKind(feature, data)));
-  if (kinds.has("live_model_detection") || data.mode === "ground") return "live";
-  if (kinds.has("mapped_feature") || ["mapped_features", "vector_features", "mapped_records"].includes(data.result_kind)) return "mapped";
-  return "prepared";
-}
-
-function featureTitle(feature, profile) {
-  const properties = feature.properties || {};
-  if (profile === "tile") return "Image candidate";
-  if (profile === "mapped") return nice(properties.display_name || properties.name || properties.visual_concept || properties.feature_type || properties.subject_layer || properties.layer || "Mapped record");
-  return nice(properties.visual_concept || properties.concept_id || state.last?.plan?.visual_query || "Detected object");
-}
-
-function conditionDistance(properties) {
-  return (properties.conditions || []).find(condition => Number.isFinite(condition.distance_m));
-}
-
-function vectorDate(properties) {
-  const layer = properties.subject_layer || properties.layer || properties.source_layer || (properties.conditions || []).find(condition => condition.reference_layer)?.reference_layer;
-  return properties.vector_extraction_date || state.capabilities?.vector_layers?.[layer]?.extraction_date;
-}
-
-function cardMeta(properties, profile) {
-  const distance = conditionDistance(properties);
-  const prefix = Number.isFinite(distance?.distance_m) ? `${distance.distance_m.toFixed(1)} m to ${nice(distance.reference_layer || "reference")} · ` : "";
-  if (profile === "mapped") return `${prefix}${nice(properties.subject_layer || properties.layer || properties.source_layer || "Map layer")} · snapshot ${vectorDate(properties) || "date unknown"}`;
-  return `${prefix}Imagery ${properties.imagery_date || properties.acquisition_date || "date unknown"}`;
-}
-
-function badgeFor(profile, uncertain) {
-  if (uncertain) return ["Needs review", "badge review"];
-  if (profile === "tile") return ["Whole-image similarity", "badge tile"];
-  if (profile === "mapped") return ["Mapped source record", "badge mapped"];
-  if (profile === "live") return ["On-demand detector observation", "badge live"];
-  return ["Prepared detector evidence", "badge"];
-}
-
-function renderExecutionMeta(data, profile) {
-  const element = $("executionMeta");
-  if (profile !== "live" || (!data.grounding_run_id && !data.grounding)) {
-    element.hidden = true;
-    element.textContent = "";
-    return;
-  }
-  const grounding = data.grounding || {};
-  const parts = [];
-  if (data.grounding_run_id) parts.push(`Run ${String(data.grounding_run_id).slice(0, 12)}`);
-  if (Number.isFinite(grounding.tiles_processed)) parts.push(`${grounding.tiles_processed}${Number.isFinite(grounding.tiles_available) ? ` of ${grounding.tiles_available}` : ""} ranked tiles analyzed`);
-  if (Number.isFinite(grounding.threshold)) parts.push(`threshold ${grounding.threshold.toFixed(3)}`);
-  if (grounding.cache_hit) parts.push("saved observations reused");
-  element.textContent = parts.join(" · ");
-  element.hidden = parts.length === 0;
-}
-
-function renderResults(data) {
-  const tiles = data.result_kind === "tile_retrieval";
-  const features = tiles ? (data.tile_candidates || []) : (data.features || []);
-  const uncertain = data.uncertain_candidates || [];
-  const profile = resultProfile(data, [...features, ...uncertain]);
-  const reviewCount = data.total_uncertain ?? uncertain.length;
-  const total = tiles ? (data.total_tile_candidates ?? features.length) : (data.total_matches ?? features.length);
-  const noun = profile === "tile" ? "image candidates" : profile === "mapped" ? "mapped records" : profile === "live" ? "on-demand detections" : "prepared matches";
-  $("resultsTitle").textContent = `${total} ${noun}${reviewCount ? ` · ${reviewCount} need review` : ""}`;
-  $("scope").textContent = data.claim_scope || "";
-  renderExecutionMeta(data, profile);
-  $("results").replaceChildren();
-  if (!features.length && !uncertain.length) showEmpty(emptyMessage(profile));
-
-  for (const [items, isUncertain] of [[features, false], [uncertain, true]]) {
-    for (const feature of items) {
-      const properties = feature.properties || {};
-      const itemProfile = resultProfile(data, [feature]);
-      const card = document.createElement("button");
-      card.type = "button";
-      card.className = "result";
-      card.dataset.id = String(featureKey(feature));
-      card.setAttribute("aria-pressed", "false");
-      if (properties.asset_url && itemProfile !== "mapped") {
-        const image = document.createElement("img");
-        image.src = properties.asset_url;
-        image.alt = itemProfile === "tile" ? "Aerial image candidate" : "Aerial source tile for this observation";
-        image.loading = "lazy";
-        card.append(image);
-      } else {
-        const marker = text("span", "", `result-marker ${itemProfile}`);
-        marker.setAttribute("aria-hidden", "true");
-        card.append(marker);
-      }
-      const content = text("div", "", "result-content");
-      content.append(text("span", isUncertain ? `Needs review: ${featureTitle(feature, itemProfile)}` : featureTitle(feature, itemProfile), "result-title"));
-      content.append(text("span", cardMeta(properties, itemProfile), "result-meta"));
-      const [badgeText, badgeClass] = badgeFor(itemProfile, isUncertain);
-      content.append(text("span", badgeText, badgeClass));
-      card.append(content);
-      card.addEventListener("click", () => selectFeature(feature, card));
-      $("results").append(card);
-    }
-  }
-
-  source("matches", features);
-  source("uncertain", uncertain);
-  source("context", data.context_features || []);
-  source("selection", []);
-  source("observations", []);
-  $("evidence").hidden = true;
-  $("matchLegend").textContent = profile === "tile" ? "Image candidates" : profile === "mapped" ? "Mapped records" : profile === "live" ? "On-demand detections" : "Prepared matches";
-  $("download").hidden = false;
-  $("exportOptions").hidden = !reviewCount;
-  const pagingTotal = tiles ? (data.total_tile_candidates ?? features.length) : Math.max(data.total_matches || 0, reviewCount);
-  const size = state.request?.page_size || 20;
-  $("pagination").hidden = pagingTotal <= size;
-  $("prevPage").disabled = data.page === 0;
-  $("nextPage").disabled = (data.page + 1) * size >= pagingTotal;
-  $("pageLabel").textContent = `${data.page + 1} / ${Math.max(1, Math.ceil(pagingTotal / size))}`;
-  $("sourceNote").textContent = profile === "mapped"
-    ? "Mapped results describe the supplied vector snapshot. Missing records do not establish real-world absence or map completeness."
-    : profile === "live"
-      ? "On-demand results cover only the ranked tiles analyzed in this run. They do not establish completeness across the wider study area."
-      : profile === "tile"
-        ? "Image discovery ranks whole tiles by similarity. It does not verify an object or its exact location."
-        : "Results describe the loaded prepared evidence. Missing detections or map tags do not establish real-world absence.";
-}
-
-function planTaskLabel(data, profile) {
-  if (profile === "tile") return "Whole-image discovery";
-  if (profile === "mapped") return "Mapped-record search";
-  if (profile === "live") return "Bounded on-demand detection";
-  return "Prepared-evidence search";
-}
-
-function predicateText(plan) {
-  if (plan.predicate === "within_distance") return `Within ${plan.distance_m} metres of ${nice(plan.reference_layer)}`;
-  if (plan.predicate === "intersects") return `Intersects ${nice(plan.reference_layer)}`;
-  return "No spatial relationship requested";
-}
-
-function renderPlan(plan, data) {
-  const profile = resultProfile(data, [...(data.features || []), ...(data.tile_candidates || []), ...(data.uncertain_candidates || [])]);
-  const rows = [["Task", planTaskLabel(data, profile)], ["Looking for", plan.visual_query || nice(plan.concept_id)], ["Spatial clause", predicateText(plan)]];
-  if (plan.attributes?.length) rows.push(["Attribute clauses", plan.attributes.map(attribute => `${nice(attribute.role || "feature")} ${attribute.field} ${nice(attribute.operator)} ${attribute.value}`).join("; ")]);
-  for (const [index, relation] of (plan.relations || []).entries()) {
-    const relationText = relation.predicate === "within_distance"
-      ? `Within ${relation.distance_m} metres of ${nice(relation.reference_layer)}`
-      : `Intersects ${nice(relation.reference_layer)}`;
-    const filters = (relation.attributes || []).map(attribute => `${attribute.field} ${nice(attribute.operator)} ${attribute.value}`).join("; ");
-    rows.push([`AND clause ${index + 2}`, filters ? `${relationText}; ${filters}` : relationText]);
-  }
-  if (profile === "live") {
-    const count = data.grounding?.tiles_processed ?? state.request?.grounding_tile_limit;
-    rows.push(["Detection scope", count ? `${count} top-ranked image ${count === 1 ? "tile" : "tiles"}` : "Bounded ranked image tiles"]);
-  }
-  const root = $("planSummary");
-  root.replaceChildren();
-  for (const [label, value] of rows) root.append(text("dt", label), text("dd", value));
-  $("plan").textContent = JSON.stringify(plan, null, 2);
-  $("planPanel").hidden = false;
-}
-
-function conditionExplanation(condition) {
-  if (condition.reason) return condition.reason;
-  if (condition.condition === "vector_source") return `Supplied ${nice(condition.subject_layer)} record ${condition.feature_id || ""} from vector snapshot ${condition.vector_extraction_date || "date unknown"}.`;
-  if (condition.condition === "visual_detection") return `Model observation of ${nice(condition.visual_query || condition.concept_id || state.last?.plan?.visual_query || "requested object")} · score ${number(condition.score)}.`;
-  if (condition.condition === "feature_association") return `${nice(condition.association)} association with ${nice(condition.layer)}${condition.feature_id ? " · " + condition.feature_id : ""}.`;
-  if (condition.field) {
-    const requested = condition.expected ?? condition.value ?? "requested value";
-    return `${nice(condition.role || "feature")} ${condition.field}: observed ${condition.observed ?? "unknown"}; requested ${nice(condition.operator || "equals")} ${requested}.`;
-  }
-  const reference = condition.reference_layer || condition.layer || "reference geometry";
-  return `${Number.isFinite(condition.distance_m) ? condition.distance_m.toFixed(2) + " metres to " : "Checked against "}${nice(reference)} on the supplied geometry.`;
-}
-
-function closeEvidence({restoreFocus = true} = {}) {
-  $("evidence").hidden = true;
-  source("selection", []);
-  source("observations", []);
-  if (restoreFocus && state.selectedControl?.isConnected) state.selectedControl.focus();
-  state.selectedControl = null;
-}
-
-function selectFeature(feature, control = null) {
-  const properties = feature.properties || {};
-  const profile = resultProfile(state.last, [feature]);
-  state.selected = feature;
-  state.selectedControl = control || document.activeElement;
-  document.querySelectorAll(".result").forEach(card => {
-    const selected = card.dataset.id === String(featureKey(feature));
-    card.classList.toggle("selected", selected);
-    card.setAttribute("aria-pressed", String(selected));
-  });
-  source("selection", [feature]);
-  source("observations", properties.evidence_geometries || []);
-  fit(boundsOf([feature]), 80);
-
-  const kindLabel = profile === "tile" ? "Image discovery candidate" : profile === "mapped" ? "Mapped source record" : profile === "live" ? "On-demand detector evidence" : "Prepared detector evidence";
-  const root = $("evidenceBody");
-  const heading = text("h2", featureTitle(feature, profile));
-  heading.id = "evidenceTitle";
-  root.replaceChildren(text("div", kindLabel, "eyebrow"), heading);
-
-  const observation = properties.observations?.[0] || {};
-  const assetUrl = properties.asset_url || observation.asset_url;
-  const box = properties.pixel_box || observation.pixel_box;
-  const width = properties.original_width || observation.original_width || properties.width;
-  const height = properties.original_height || observation.original_height || properties.height;
-  if (assetUrl && profile !== "mapped") {
-    const frame = text("div", "", "evidence-image");
-    const image = document.createElement("img");
-    image.src = assetUrl;
-    image.alt = profile === "tile" ? "Aerial image candidate" : "Aerial source tile with the detector observation outlined when a box is available";
-    frame.append(image);
-    if (box?.length === 4 && width > 0 && height > 0) {
-      const overlay = text("div", "", "pixel-box");
-      overlay.style.left = (box[0] / width * 100) + "%";
-      overlay.style.top = (box[1] / height * 100) + "%";
-      overlay.style.width = ((box[2] - box[0]) / width * 100) + "%";
-      overlay.style.height = ((box[3] - box[1]) / height * 100) + "%";
-      frame.append(overlay);
-    }
-    root.append(frame);
-  }
-
-  const layer = properties.subject_layer || properties.layer || properties.source_layer || properties.association_layer;
-  const commonBounds = boundsOf([feature])?.map(value => value.toFixed(6)).join(", ");
-  let fields;
-  if (profile === "mapped") {
-    fields = [["Map layer", nice(layer || "Mapped feature")], ["Vector snapshot", vectorDate(properties) || "Unknown"], ["Feature ID", featureKey(feature)], ["Geometry", nice(properties.geometry_role || feature.geometry?.type)], ["Source", properties.source_name || properties.source || "Supplied vector data"], ["Imagery coverage dates", properties.imagery_coverage_dates?.join(", ")], ["Bounds W,S,E,N", commonBounds]];
-  } else if (profile === "tile") {
-    fields = [["Imagery date", properties.imagery_date || properties.acquisition_date || "Unknown"], ["Image similarity", number(properties.retrieval_similarity)], ["Source tile", properties.tile_id], ["Bounds W,S,E,N", commonBounds]];
+  const list = $("resultList");
+  list.replaceChildren();
+  if (!state.records.length) {
+    const empty = node("div", "", "empty-results");
+    empty.append(node("strong", "No findings in this sample"), node("p", "No returned matches does not establish real-world absence. Try a supported example or inspect the source coverage."));
+    list.append(empty);
   } else {
-    fields = [["Imagery date", properties.imagery_date || properties.acquisition_date || observation.imagery_date || "Unknown"], ["Vector snapshot", vectorDate(properties) || "Not used"], ["Geometry", nice(properties.geometry_role || "visual detection envelope")], ["Detector score", number(properties.visual_score ?? properties.score)], ["Image similarity", number(properties.retrieval_similarity)], ["Association", nice(properties.association?.status || properties.association || "Not applicable")], ["Source tile", properties.tile_id || observation.tile_id], ["Detection run", profile === "live" ? state.last?.grounding_run_id : null], ["Model", properties.model_id || observation.model_id || state.last?.grounding?.model_id], ["Bounds W,S,E,N", commonBounds]];
+    state.records.forEach((record, index) => list.append(resultCard(record, index)));
   }
-  const definitionList = document.createElement("dl");
-  for (const [label, value] of fields) {
-    if (value === null || value === undefined || value === "") continue;
-    definitionList.append(text("dt", label), text("dd", value));
+
+  sourceData("scene-results", profile === "scene" ? linked.map((feature, index) => cloneForMap(feature, `scene-${index}`, "scene")) : []);
+  sourceData("linked-results", profile === "scene" ? [] : linked.map((feature, index) => cloneForMap(feature, `${profile}-${index}`, "linked")));
+  sourceData("linked-observations", ["cached", "live"].includes(profile) ? linked.flatMap((feature, index) => observationGeometries(feature, `${profile}-${index}`)) : []);
+  sourceData("review-results", review.map((feature, index) => cloneForMap(feature, `review-${index}`, "review")));
+  sourceData("context-results", Array.isArray(data.context_features) ? data.context_features : []);
+  sourceData("selected-result", []);
+  setImageryFocus(true);
+
+  $("resultsPanel").hidden = false;
+  document.body.classList.add("has-results");
+  closeEvidence({restoreFocus: false});
+  window.setTimeout(() => state.map?.resize(), 350);
+  fitBounds(featureBounds([...linked, ...review]) || state.areaBounds);
+  if (profile === "scene") setStatus(`${candidateCount} image scenes · no object claim`);
+  else if (profile === "mapped") setStatus(`${candidateCount} mapped records`);
+  else if (profile === "live") setStatus(`${candidateCount} bounded model observations`);
+  else setStatus(`${candidateCount} AI candidates · ${footprintLinks} footprint ${footprintLinks === 1 ? "link" : "links"}`);
+}
+
+function resultCard(record, index) {
+  const properties = record.feature.properties || {};
+  const profile = record.profile;
+  const button = node("button", "", "result-card");
+  button.type = "button";
+  button.dataset.recordId = record.id;
+  button.setAttribute("aria-pressed", "false");
+  button.style.animationDelay = `${Math.min(index, 12) * 28}ms`;
+
+  const thumbnail = node("span", "", "result-thumb");
+  const asset = safeAssetUrl(properties.asset_url);
+  if (asset) {
+    const image = document.createElement("img");
+    image.src = asset;
+    image.alt = "";
+    image.loading = "lazy";
+    thumbnail.append(image);
+  } else thumbnail.classList.add("no-image");
+
+  const copy = node("span", "", "result-copy");
+  const sequence = String(index + 1).padStart(2, "0");
+  const concept = conceptName(state.result, record.feature);
+  const title = profile === "scene" ? `Image scene ${sequence}`
+    : profile === "mapped" ? `${pretty(concept || properties.layer || "Mapped record")} ${sequence}`
+      : `${pretty(concept || "Model observation")} ${sequence}`;
+  copy.append(node("span", title, "result-title"));
+  const subtitle = profile === "scene"
+    ? (finite(properties.retrieval_similarity) ? `Whole-image similarity ${Number(properties.retrieval_similarity).toFixed(3)}` : "Whole-image scene candidate")
+    : profile === "mapped" ? `Mapped source record${properties.layer ? ` · ${pretty(properties.layer)}` : ""}`
+      : `${finite(properties.visual_score) ? `Model score ${Number(properties.visual_score).toFixed(3)}` : "Model score unavailable"}${properties.association === "unique" ? " · footprint linked" : ""}`;
+  copy.append(node("span", subtitle, "result-subtitle"));
+  const badgeText = profile === "scene" ? "SCENE ONLY" : profile === "mapped" ? "MAPPED" : record.supported ? "SUPPORTED" : "REVIEW";
+  const badge = node("span", badgeText, `result-badge${record.supported || profile === "mapped" ? " linked" : ""}${profile === "scene" ? " scene" : ""}`);
+  button.append(thumbnail, copy, badge);
+  button.addEventListener("click", () => selectRecord(record.id));
+  return button;
+}
+
+function addDefinition(list, label, value) {
+  if (value === undefined || value === null || value === "") return;
+  list.append(node("dt", label), node("dd", value));
+}
+
+function overlayPath(geometry, tile) {
+  const corners = Array.isArray(tile?.coordinates) ? tile.coordinates : [];
+  if (corners.length !== 4) return "";
+  const west = Math.min(...corners.map(point => Number(point[0])));
+  const east = Math.max(...corners.map(point => Number(point[0])));
+  const south = Math.min(...corners.map(point => Number(point[1])));
+  const north = Math.max(...corners.map(point => Number(point[1])));
+  if (!(east > west && north > south)) return "";
+  return outerRings(geometry).map(ring => ring.map((point, index) => {
+    const x = (Number(point[0]) - west) / (east - west) * 100;
+    const y = (north - Number(point[1])) / (north - south) * 100;
+    return `${index ? "L" : "M"}${x.toFixed(4)},${y.toFixed(4)}`;
+  }).join(" ") + " Z").join(" ");
+}
+
+function footprintOverlay(feature, properties) {
+  if (properties.association !== "unique") return null;
+  const tile = (state.mapData?.tiles || []).find(item => item.tile_id === properties.tile_id);
+  const pathData = overlayPath(feature.geometry, tile);
+  if (!pathData) return null;
+  const namespace = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(namespace, "svg");
+  svg.classList.add("footprint-overlay");
+  svg.setAttribute("viewBox", "0 0 100 100");
+  svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS(namespace, "path");
+  path.setAttribute("d", pathData);
+  path.setAttribute("fill-rule", "evenodd");
+  svg.append(path);
+  return svg;
+}
+
+function evidenceVisual(record) {
+  const feature = record.feature;
+  const properties = feature.properties || {};
+  const asset = safeAssetUrl(properties.asset_url);
+  if (!asset) return node("div", "", "evidence-placeholder");
+  const tile = (state.mapData?.tiles || []).find(item => item.tile_id === properties.tile_id);
+  const width = Number(properties.original_width || properties.width || tile?.width);
+  const height = Number(properties.original_height || properties.height || tile?.height);
+  const visual = node("div", "", "evidence-visual");
+  if (width > 0 && height > 0) visual.style.aspectRatio = `${width} / ${height}`;
+  const image = document.createElement("img");
+  image.className = "evidence-image";
+  image.src = asset;
+  image.alt = record.profile === "scene" ? "Source tile for the selected image scene." : "Source tile for the selected model observation.";
+  visual.append(image);
+  const footprint = ["cached", "live"].includes(record.profile) ? footprintOverlay(feature, properties) : null;
+  if (footprint) visual.append(footprint);
+  const box = properties.pixel_box;
+  if (["cached", "live"].includes(record.profile) && Array.isArray(box) && box.length === 4 && width > 0 && height > 0) {
+    const marker = node("span", "", `detection-box${properties.association === "unique" ? " linked" : ""}`);
+    const left = Math.max(0, Math.min(100, Number(box[0]) / width * 100));
+    const top = Math.max(0, Math.min(100, Number(box[1]) / height * 100));
+    marker.style.left = `${left}%`;
+    marker.style.top = `${top}%`;
+    marker.style.width = `${Math.max(1, Math.min(100 - left, (Number(box[2]) - Number(box[0])) / width * 100))}%`;
+    marker.style.height = `${Math.max(1, Math.min(100 - top, (Number(box[3]) - Number(box[1])) / height * 100))}%`;
+    visual.append(marker);
   }
-  root.append(definitionList);
+  return visual;
+}
 
-  const explanation = profile === "mapped"
-    ? "This result comes from the supplied map or vector snapshot. It has no detector score or image crop."
-    : profile === "tile"
-      ? "Similarity ranks whole images. This candidate has no verified object location or spatial relationship."
-      : profile === "live"
-        ? "This detector observation was produced within the ranked tiles analyzed for this run. Scores are uncalibrated model outputs, and the bounded run does not establish wider-area completeness."
-        : "This detector observation was prepared before the search. Scores are uncalibrated model outputs; the outline shows the original model observation when available.";
-  root.append(text("p", explanation, "evidence-note"));
+function conditionCopy(condition) {
+  if (condition.condition === "visual_detection") {
+    const score = finite(condition.score) ? `Score ${Number(condition.score).toFixed(3)}` : "Score unavailable";
+    const threshold = finite(condition.screening_threshold) ? ` · preparation threshold ${Number(condition.screening_threshold).toFixed(3)}` : "";
+    return `${score}${threshold}`;
+  }
+  if (condition.condition === "feature_association") {
+    return condition.association === "unique"
+      ? "Uniquely associated with one supplied reference footprint."
+      : "No unique supplied footprint association was established.";
+  }
+  if (finite(condition.distance_m) || finite(condition.radius_m)) {
+    const witness = finite(condition.distance_m) ? `${Number(condition.distance_m).toFixed(2)} m measured` : "Witness distance unavailable";
+    const radius = finite(condition.radius_m) ? ` · ${Number(condition.radius_m).toFixed(1)} m requested radius` : "";
+    const verificationWitness = condition.verification?.witnesses?.[0];
+    const interval = verificationWitness?.distance_interval_m || condition.reference_candidates?.[0]?.distance_interval_m;
+    const range = Array.isArray(interval) && interval.length === 2 && interval.every(finite)
+      ? ` · verified interval ${Number(interval[0]).toFixed(2)}–${Number(interval[1]).toFixed(2)} m` : "";
+    return `${witness}${radius}${range}`;
+  }
+  return condition.reason || pretty(condition.status);
+}
 
-  if (properties.conditions?.length) {
-    const section = text("div", "", "conditions");
-    section.append(text("h3", "Evidence checks"));
-    for (const condition of properties.conditions) {
-      const div = text("div", "", `condition ${condition.status || "unknown"}`);
-      div.append(text("strong", `${nice(condition.condition || condition.predicate || condition.field || "Evidence check")}: ${nice(condition.status)}`), text("p", conditionExplanation(condition)));
-      section.append(div);
+function renderEvidence(record) {
+  const feature = record.feature;
+  const properties = feature.properties || {};
+  const profile = record.profile;
+  const root = $("evidenceBody");
+  const associationLinked = properties.association === "unique";
+  root.replaceChildren(evidenceVisual(record));
+  const label = profile === "scene" ? "WHOLE-IMAGE SCENE"
+    : profile === "mapped" ? "MAPPED SOURCE RECORD"
+      : profile === "live" ? "BOUNDED MODEL OBSERVATION"
+        : "PRECOMPUTED MODEL CANDIDATE";
+  root.append(node("p", label, "evidence-label"));
+  const concept = conceptName(state.result, feature);
+  const titleText = profile === "scene" ? `Image scene ${String(record.index + 1).padStart(2, "0")}`
+    : profile === "mapped" ? pretty(concept || properties.layer || "Mapped record")
+      : pretty(concept || "Model observation");
+  const title = node("h2", titleText);
+  title.id = "evidenceTitle";
+  root.append(title);
+  const summary = profile === "scene"
+    ? "This candidate ranks an entire source image. It does not locate or verify an object."
+    : profile === "mapped" ? "This geometry comes from the supplied map or vector snapshot."
+      : associationLinked
+        ? `The model observation is linked to one supplied reference footprint${record.supported ? " and passes the returned evidence checks" : ", with another check still unresolved"}.`
+        : record.supported ? "The bounded model observation passes the returned evidence checks in this sample."
+          : "The model observation remains unresolved and needs review.";
+  root.append(node("p", summary, "evidence-summary"));
+  const statusText = profile === "scene" ? "SCENE CANDIDATE" : profile === "mapped" ? "MAPPED RECORD" : record.supported ? "SUPPORTED IN SAMPLE" : "NEEDS REVIEW";
+  root.append(node("span", statusText, `evidence-status${record.supported || profile === "mapped" ? " linked" : ""}${profile === "scene" ? " scene" : ""}`));
+
+  const details = document.createElement("dl");
+  details.className = "evidence-grid";
+  const geographic = ["cached", "live"].includes(profile) ? observationGeometry(feature) : feature.geometry;
+  const bounds = featureBounds([{geometry: geographic}]);
+  const centroid = centroidOfGeometry(geographic);
+  addDefinition(details, "Evidence", profile === "scene" ? "Whole-image similarity"
+    : profile === "mapped" ? "Supplied mapped feature"
+      : profile === "live" ? "On-demand OWLv2 observation" : "Precomputed OWLv2 observation");
+  addDefinition(details, "Association", ["cached", "live"].includes(profile) ? (associationLinked ? "Unique reference footprint link" : properties.association ? pretty(properties.association) : "Not requested") : null);
+  addDefinition(details, "Model score", ["cached", "live"].includes(profile) && finite(properties.visual_score) ? `${Number(properties.visual_score).toFixed(3)} · uncalibrated` : null);
+  addDefinition(details, "Image similarity", profile === "scene" && finite(properties.retrieval_similarity) ? `${Number(properties.retrieval_similarity).toFixed(3)} · whole image` : null);
+  addDefinition(details, "Pixel box", ["cached", "live"].includes(profile) && Array.isArray(properties.pixel_box) ? `[${properties.pixel_box.map(value => Number(value).toFixed(1)).join(", ")}] px` : null);
+  addDefinition(details, profile === "scene" ? "Scene bounds" : "Geographic bbox", bounds ? `W ${bounds[0].toFixed(6)} · S ${bounds[1].toFixed(6)} · E ${bounds[2].toFixed(6)} · N ${bounds[3].toFixed(6)}` : null);
+  addDefinition(details, "Centroid", centroid ? `${centroid[1].toFixed(6)} lat · ${centroid[0].toFixed(6)} lon` : null);
+  addDefinition(details, "Footprint", associationLinked ? (properties.id || feature.id) : null);
+  addDefinition(details, "Layer", profile === "mapped" ? (properties.subject_layer || properties.layer || properties.source_layer) : null);
+  addDefinition(details, "Source tile", properties.tile_id || properties.tile_ids?.[0]);
+  addDefinition(details, "Image date", properties.imagery_date || "Unknown");
+  addDefinition(details, "Model revision", ["cached", "live"].includes(profile) && properties.model_revision ? String(properties.model_revision).slice(0, 12) : null);
+  addDefinition(details, "Evidence receipt", properties.evidence_receipt?.id || properties.receipt_id);
+  root.append(details);
+
+  const conditions = Array.isArray(properties.conditions) ? properties.conditions : [];
+  if (conditions.length) {
+    const section = node("section", "", "conditions");
+    section.append(node("h3", "EVIDENCE CHECKS"));
+    for (const condition of conditions) {
+      const card = node("div", "", `condition ${safeClass(condition.status)}`);
+      card.append(node("strong", `${pretty(condition.condition)} · ${pretty(condition.status)}`));
+      card.append(node("span", conditionCopy(condition)));
+      section.append(card);
     }
     root.append(section);
   }
-  const details = document.createElement("details");
-  details.append(text("summary", "Full evidence record"), text("pre", JSON.stringify(properties, null, 2)));
-  root.append(details);
-  $("evidence").hidden = false;
-  $("evidence").focus({preventScroll: true});
-  if (window.matchMedia("(max-width:760px)").matches) $("evidence").scrollIntoView({behavior: "smooth", block: "nearest"});
+  const disclaimer = profile === "scene"
+    ? "Whole-image similarity retrieves scenes only. It does not establish that a requested object exists or identify its location."
+    : profile === "mapped" ? "Mapped records describe the supplied snapshot. Missing records do not establish real-world absence or complete coverage."
+      : "Scores are uncalibrated model outputs. These observations and any footprint links describe a bounded evidence sample, not a verified object count or complete real-world coverage.";
+  root.append(node("p", disclaimer, "evidence-disclaimer"));
 }
 
-function setBusy(busy, mode = currentMode(), reuseGrounding = false) {
-  $("searchButton").disabled = busy;
-  $("searchForm").setAttribute("aria-busy", String(busy));
-  $("results").setAttribute("aria-busy", String(busy));
-  $("query").readOnly = busy;
-  $("groundingTileLimit").disabled = busy;
-  $("datasetSelect").disabled = busy;
-  document.querySelectorAll('input[name="mode"]').forEach(input => { input.disabled = busy || input.dataset.capDisabled === "true"; });
-  $("searchButtonLabel").textContent = busy ? (mode === "ground" ? (reuseGrounding ? "Rechecking evidence…" : "Detecting objects…") : mode === "explore" ? "Ranking images…" : "Checking evidence…") : MODE_UI[mode].button;
+function selectRecord(id, {moveMap = true} = {}) {
+  const record = state.records.find(item => item.id === id);
+  if (!record) return;
+  state.selectedId = id;
+  document.querySelectorAll(".result-card").forEach(button => button.setAttribute("aria-pressed", String(button.dataset.recordId === id)));
+  const selected = [cloneForMap(record.feature, id, "selected"), ...observationGeometries(record.feature, id)];
+  sourceData("selected-result", selected);
+  renderEvidence(record);
+  $("evidencePanel").hidden = false;
+  document.body.classList.add("detail-open");
+  const overlay = window.matchMedia("(max-width: 1120px)").matches;
+  $("evidencePanel").setAttribute("aria-modal", String(overlay));
+  $("resultsPanel").inert = overlay;
+  $("searchCluster").inert = overlay;
+  document.querySelector(".topbar").inert = overlay;
+  document.querySelector(".map-toolbar").inert = overlay;
+  document.querySelector(".app-rail").inert = overlay;
+  $("map").inert = overlay;
+  $("evidencePanel").focus({preventScroll: true});
+  if (moveMap) fitBounds(featureBounds(selected), true);
 }
 
-// The server validates the edit; this only controls reuse of the displayed run.
-const radiusFollowup = query => /^\s*(?:(?:please\s+)?(?:make|change|set|increase|decrease)\s+(?:it|this|that|the\s+radius|radius|distance)\s*(?:to\s*)?|(?:use|try)\s+|(?:radius|distance)\s*(?:to|=)?\s*)-?\d+(?:\.\d+)?\s*(?:kilometres?|kilometers?|km|metres?|meters?|m)(?:\s+instead)?[.!?]?\s*$/i.test(query);
+function closeEvidence({restoreFocus = true} = {}) {
+  const selected = state.selectedId;
+  state.selectedId = null;
+  sourceData("selected-result", []);
+  $("evidencePanel").hidden = true;
+  document.body.classList.remove("detail-open");
+  $("evidencePanel").setAttribute("aria-modal", "false");
+  $("resultsPanel").inert = false;
+  $("searchCluster").inert = false;
+  document.querySelector(".topbar").inert = false;
+  document.querySelector(".map-toolbar").inert = false;
+  document.querySelector(".app-rail").inert = false;
+  $("map").inert = false;
+  document.querySelectorAll(".result-card").forEach(button => button.setAttribute("aria-pressed", "false"));
+  if (restoreFocus && selected) document.querySelector(`[data-record-id="${CSS.escape(selected)}"]`)?.focus();
+}
 
-async function search(page = null) {
+function closeResults() {
+  closeEvidence({restoreFocus: false});
+  $("resultsPanel").hidden = false;
+  $("resultsEmpty").hidden = false;
+  $("resultMetrics").hidden = true;
+  $("closeResults").hidden = true;
+  $("scopeNote").hidden = true;
+  $("resultsTitle").textContent = "Evidence, not guesses.";
+  $("resultList").replaceChildren();
+  $("exportResults").disabled = true;
+  $("exampleSection").hidden = false;
+  document.body.classList.remove("has-results");
+  for (const id of ["scene-results", "linked-results", "linked-observations", "review-results", "context-results", "selected-result"]) sourceData(id, []);
+  setImageryFocus(false);
+  state.records = [];
+  state.result = null;
+  state.exportUrl = null;
+  setStatus(`${state.mapData?.tiles?.length || 0} source tiles ready`);
+  fitBounds(state.areaBounds);
+  window.setTimeout(() => state.map?.resize(), 350);
+  $("query").focus();
+}
+
+async function search() {
   const query = $("query").value.trim();
-  if (page === null && query.length < 3) return;
-  const mode = page !== null ? state.request.mode : currentMode();
-  const reuseGrounding = mode === "ground" && Boolean(state.groundingRunId) && (page !== null ||
-    (radiusFollowup(query) && Number($("groundingTileLimit").value) === state.request?.grounding_tile_limit));
-  const sequence = ++state.searchSequence;
-  setBusy(true, mode, reuseGrounding);
-  status(mode === "ground" ? (reuseGrounding ? "Rechecking spatial conditions using saved detections…" : "Ranking imagery, then running bounded on-demand detection. This can take longer…") : mode === "explore" ? "Ranking whole images by scene similarity…" : "Interpreting the question and checking prepared geographic evidence…");
+  if (!state.ready || state.busy || query.length < 3) return;
+  state.searchController?.abort();
+  const controller = new AbortController();
+  state.searchController = controller;
+  setBusy(true);
+  startBusyStatus();
+  closeEvidence({restoreFocus: false});
+  appendMessage("user", query);
+  $("exampleSection").hidden = true;
   try {
-    let body;
-    if (page !== null) {
-      body = {plan: state.last.plan, dataset_version: state.last.dataset_version, dataset_id: state.datasetId, mode, page, page_size: state.request.page_size};
-      if (mode === "ground") {
-        body.grounding_tile_limit = state.request.grounding_tile_limit;
-        body.grounding_threshold = state.request.grounding_threshold;
-        body.grounding_run_id = state.groundingRunId || state.last.grounding_run_id;
-      }
-    } else {
-      body = {query, previous_plan: state.previousPlan, dataset_id: state.datasetId, mode, page: 0, page_size: 20};
-      if (mode === "ground") {
-        body.grounding_tile_limit = Number($("groundingTileLimit").value) || 2;
-        body.grounding_threshold = state.groundingThreshold;
-        if (reuseGrounding) body.grounding_run_id = state.groundingRunId;
-      }
+    if (state.mode === "conversation" && state.assistant?.configured) {
+      await conversationSearch(query, controller);
+      $("query").value = "";
+      return;
     }
-    if (!body.dataset_id) delete body.dataset_id;
-    const data = await request("/api/query", body);
-    if (sequence !== state.searchSequence) return;
-    state.last = data;
-    state.groundingRunId = mode === "ground" ? (data.grounding_run_id || body.grounding_run_id || null) : null;
-    state.request = {...body, grounding_run_id: state.groundingRunId};
-    state.previousPlan = data.plan;
-    renderPlan(data.plan, data);
-    $("followup").hidden = false;
-    renderResults(data);
-    const profile = resultProfile(data, [...(data.features || []), ...(data.tile_candidates || [])]);
-    if (profile === "tile") status(`${data.tiles_processed} of ${data.tiles_available} image tiles ranked. Inspect candidates before making object claims.`);
-    else if (profile === "mapped") status(`${data.total_matches ?? data.features?.length ?? 0} mapped records satisfy the supplied clauses. These results have no detector or image-crop claim.`);
-    else if (profile === "live") status(`${data.grounding?.tiles_processed ?? data.tiles_processed} ranked tiles analyzed on demand. Reuse this saved run for follow-ups, paging, and export.`);
-    else status(`${data.tiles_processed} of ${data.tiles_available} prepared tiles checked. Results use cached detections and supplied spatial evidence.`);
+    const followup = state.result?.plan && /^(?:(?:and\s+)?(?:within|under|less than)(?:\b|(?=[\d.+-]))|(?:make|change|set|increase|decrease|use|try)\s+(?:(?:it|this|that)\b|(?:the\s+)?(?:radius|distance)(?:\b|(?=[\d.+-]))))/i.test(query);
+    const body = {query, dataset_id: state.datasetId, grounding_tile_limit: 2, page: 0, page_size: 100};
+    if (followup) { body.previous_plan = state.result.plan; body.mode = executionMode(state.result); }
+    const data = await requestJson(followup ? "/api/query" : "/api/search", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    stopBusyStatus();
+    const resultDataset = data.dataset_id || state.datasetId;
+    if (resultDataset !== state.datasetId) {
+      setStatus("Loading the selected evidence source");
+      await loadDataset(resultDataset);
+    }
+    state.result = data;
+    state.exportUrl = null;
+    displayResults(data, query);
+    appendMessage("assistant", resultSummary(data));
+    $("query").value = "";
   } catch (error) {
-    if (sequence === state.searchSequence) status(error.message, true);
+    stopBusyStatus();
+    if (error.name !== "AbortError") { setStatus(error.message, "error"); appendMessage("assistant", error.message, "message-error"); }
   } finally {
-    if (sequence === state.searchSequence) setBusy(false, mode);
+    if (state.searchController === controller) state.searchController = null;
+    setBusy(false);
   }
 }
 
-$("searchForm").addEventListener("submit", event => { event.preventDefault(); search(); });
-$("prevPage").addEventListener("click", () => search(Math.max(0, state.last.page - 1)));
-$("nextPage").addEventListener("click", () => search(state.last.page + 1));
-$("reset").addEventListener("click", () => { clearConversationContext(); status("Follow-up context cleared. Enter a new question."); });
-document.querySelectorAll('input[name="mode"]').forEach(input => input.addEventListener("change", () => {
-  state.searchSequence += 1;
-  clearConversationContext();
-  state.last = null;
-  state.request = null;
-  $("planPanel").hidden = true;
-  $("download").hidden = true;
-  $("exportOptions").hidden = true;
-  $("includeReview").checked = false;
-  $("pagination").hidden = true;
-  $("scope").textContent = "";
-  $("executionMeta").hidden = true;
-  $("resultsTitle").textContent = "Your evidence appears here";
-  closeEvidence({restoreFocus: false});
-  clearResultSources();
-  showEmpty({catalog_scan: "Enter a question to search prepared geographic evidence.", explore: "Describe a scene to discover relevant imagery.", ground: "Describe the objects to detect in selected imagery."}[input.value]);
-  updateModeUi(input.value);
-}));
-$("closeEvidence").addEventListener("click", () => closeEvidence());
-document.addEventListener("keydown", event => { if (event.key === "Escape" && !$("evidence").hidden) closeEvidence(); });
-$("datasetSelect").addEventListener("change", event => loadDataset(event.target.value));
-$("download").addEventListener("click", () => {
-  if (!state.last) return;
-  const params = new URLSearchParams({plan: JSON.stringify(state.last.plan), mode: state.request.mode, dataset_version: state.last.dataset_version, include_uncertain: String($("includeReview").checked)});
-  if (state.datasetId) params.set("dataset_id", state.datasetId);
-  const displayedRunId = state.groundingRunId || state.last.grounding_run_id;
-  if (state.request.mode === "ground" && displayedRunId) params.set("grounding_run_id", displayedRunId);
-  const anchor = document.createElement("a");
-  anchor.href = "/api/export?" + params.toString();
-  anchor.download = "terralens-evidence.geojson";
-  document.body.append(anchor);
-  anchor.click();
-  anchor.remove();
-  status(state.request.mode === "ground" ? "GeoJSON download requested from the saved detection run; no new inference was requested." : "GeoJSON download requested for the selected execution mode and its supporting evidence.");
-});
+async function exportResults() {
+  const result = state.result;
+  if ((!result?.plan && !state.exportUrl) || $("exportResults").disabled) return;
+  $("exportResults").disabled = true;
+  setStatus("Preparing complete GeoJSON");
+  try {
+    const body = {
+      plan: result.plan,
+      dataset_version: result.dataset_version,
+      dataset_id: result.dataset_id || state.datasetId,
+      mode: executionMode(result),
+      include_uncertain: true,
+      page: 0,
+      page_size: 100,
+    };
+    if (result.grounding_run_id) body.grounding_run_id = result.grounding_run_id;
+    const response = state.exportUrl ? await fetch(state.exportUrl) : await fetch("/api/export", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      const detail = typeof data.detail === "string" ? data.detail
+        : Array.isArray(data.detail) ? data.detail.slice(0, 2).map(item => item.msg || "Invalid export field").join("; ") : null;
+      throw new Error(detail || `Export failed (${response.status}).`);
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    const datasetSlug = String(result.dataset_id || state.datasetId || "evidence").replace(/[^a-z0-9_-]+/gi, "-").toLowerCase();
+    anchor.download = `terralens-${datasetSlug}-evidence.geojson`;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    setStatus("GeoJSON downloaded");
+  } catch (error) {
+    setStatus(error.message, "error");
+  } finally {
+    $("exportResults").disabled = !state.result?.plan && !state.exportUrl;
+  }
+}
+
+function applyLayerVisibility() {
+  for (const [ids, visible] of [[state.imageryLayers, $("imageryToggle").checked], [state.vectorLayers, $("vectorsToggle").checked]]) {
+    for (const id of ids) if (state.map?.getLayer(id)) state.map.setLayoutProperty(id, "visibility", visible ? "visible" : "none");
+  }
+}
+
+function setBasemap(mode) {
+  state.basemapMode = mode === "street" ? "street" : "satellite";
+  for (const type of ["satellite", "street"]) {
+    if (state.map?.getLayer(`${type}-basemap`)) state.map.setLayoutProperty(`${type}-basemap`, "visibility", type === state.basemapMode ? "visible" : "none");
+    const button = $(`${type}Basemap`);
+    button.classList.toggle("active", type === state.basemapMode);
+    button.setAttribute("aria-pressed", String(type === state.basemapMode));
+  }
+}
+
+function toggleExpandedMap(force) {
+  const expanded = typeof force === "boolean" ? force : !document.body.classList.contains("map-expanded");
+  document.body.classList.toggle("map-expanded", expanded);
+  $("expandMap").setAttribute("aria-pressed", String(expanded));
+  $("expandMap").setAttribute("aria-label", expanded ? "Exit expanded map" : "Expand map");
+  $("expandMap").title = expanded ? "Exit expanded map (Escape)" : "Expand map";
+  window.requestAnimationFrame(() => state.map?.resize());
+  window.setTimeout(() => state.map?.resize(), 300);
+}
+
+function renderExamples(capabilities) {
+  const tasks = Array.isArray(capabilities.task_catalog) ? capabilities.task_catalog : [];
+  const choices = [];
+  const add = task => { if (task && !choices.some(item => item.query === task.query)) choices.push(task); };
+  const maximum = Number(capabilities.limits?.maximum_distance_m) || 20;
+  const withDistance = (task, metres) => task ? {...task, query: task.query.replace(/within\s+[\d.]+\s+(?:metres|meters)/i, `within ${Math.min(metres, maximum)} metres`)} : null;
+  const cachedSpatial = tasks.filter(task => task.evidence_kind === "cached_model_detection" && /within/i.test(task.query));
+  const pools = cachedSpatial.find(task => /pool/i.test(task.query));
+  const roofs = cachedSpatial.find(task => /roof|building/i.test(task.query));
+  add(withDistance(pools, 100));
+  add(withDistance(roofs || cachedSpatial[0], pools ? 50 : 20));
+  add(withDistance(tasks.find(task => task.evidence_kind === "mapped_feature" && /within/i.test(task.query) && !/=/.test(task.query)), 20));
+  add(tasks.find(task => task.evidence_kind === "mapped_feature" && /roads/i.test(task.query) && !/within/i.test(task.query)));
+  add(tasks.find(task => task.evidence_kind === "image_similarity"));
+  if (choices.length < 5) tasks.filter(task => !/=/.test(task.query)).forEach(add);
+  const root = $("exampleList");
+  root.replaceChildren();
+  for (const task of choices.slice(0, 5)) {
+    const button = node("button", "", "example-query");
+    button.type = "button";
+    button.append(node("span", task.query), node("span", "→", "example-arrow"));
+    button.addEventListener("click", () => { $("query").value = task.query; updateSubmit(); search(); });
+    root.append(button);
+  }
+  if (!choices.length) root.append(node("p", "No supported examples are registered for this area.", "examples-loading"));
+  $("query").placeholder = choices[0]?.query || "Ask a question about this study area…";
+}
+
+function appendMessage(role, message, className = "") {
+  const article = node("article", "", `conversation-message chat-message ${role} message-${role}${className ? ` ${className}${className === "message-error" ? " error" : ""}` : ""}`);
+  article.append(node("span", role === "user" ? "YOU" : "TERRALENS", "message-author message-role"), node("p", message));
+  const root = $("conversationThread");
+  root.append(article);
+  root.scrollTop = root.scrollHeight;
+  return article;
+}
+
+function resultSummary(data) {
+  const profile = resultProfile(data);
+  const count = isCount(data.total_matches) ? data.total_matches : resultItems(data).length;
+  const review = isCount(data.total_uncertain) ? data.total_uncertain : (data.uncertain_candidates || []).length;
+  if (profile === "scene") {
+    const scenes = isCount(data.total_tile_candidates) ? data.total_tile_candidates : resultItems(data).length;
+    return `${scenes} image ${scenes === 1 ? "scene" : "scenes"} ranked by whole-image similarity. Select a scene to inspect the imagery. This does not locate or verify individual objects.`;
+  }
+  if (profile === "mapped") return `${count} mapped ${count === 1 ? "record" : "records"} matched the search${review ? `; ${review} need review` : ""}. These findings describe the supplied vector snapshot. Select one to see its coordinates and source.`;
+  return `${count} model ${count === 1 ? "candidate passes" : "candidates pass"} the returned evidence checks${review ? `; ${review} need review` : ""}. Select a finding to inspect the source image, geographic box and spatial checks. This is a sample, not a complete object inventory.`;
+}
+
+function setMode(mode) {
+  if (state.busy || (mode === "conversation" && !state.assistant?.configured)) return;
+  state.mode = mode;
+  for (const [id, selected] of [["expertMode", mode === "search"], ["conversationMode", mode === "conversation"]]) {
+    $(id).classList.toggle("active", selected);
+    $(id).setAttribute("aria-pressed", String(selected));
+  }
+  $("composerHint").textContent = mode === "conversation" ? "Ask a question or follow up" : "Use a place, object or distance";
+  $("query").maxLength = mode === "conversation" ? 2000 : 500;
+  setStatus(mode === "conversation" ? "Conversation ready · evidence checks remain visible" : `${state.mapData?.tiles?.length || 0} source tiles ready`);
+  $("query").focus();
+}
+
+async function conversationSearch(query, controller) {
+  const body = {message: query, dataset_id: state.datasetId};
+  if (state.conversationId) body.conversation_id = state.conversationId;
+  let job = await requestJson("/api/chat", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body), signal: controller.signal});
+  state.conversationId = job.conversation_id;
+  stopBusyStatus();
+  for (let attempts = 0; attempts < 180; attempts += 1) {
+    if (controller.signal.aborted) throw new DOMException("Search interrupted", "AbortError");
+    if (["succeeded", "failed"].includes(job.status)) break;
+    setStatus(job.stage?.label || "Checking geographic evidence");
+    await new Promise(resolve => window.setTimeout(resolve, 1500));
+    job = await requestJson(`/api/jobs/${encodeURIComponent(job.job_id)}?conversation_id=${encodeURIComponent(state.conversationId)}`, {signal: controller.signal});
+  }
+  if (job.status === "failed") throw new Error(job.message || "The conversation workflow could not complete.");
+  if (job.status !== "succeeded") throw new Error("The workflow is taking longer than expected. The submitted job may still be running.");
+  const response = job.result || {};
+  const message = appendMessage("assistant", response.message || "The evidence workflow has completed.");
+  const artifacts = Array.isArray(response.artifacts) ? response.artifacts : [];
+  const maps = artifacts.filter(artifact => artifact.kind === "map" && artifact.result);
+  const showMap = async artifact => {
+    const data = artifact.result;
+    if (data.dataset_id && data.dataset_id !== state.datasetId) await loadDataset(data.dataset_id);
+    state.result = data;
+    state.exportUrl = response.export_url || null;
+    displayResults(data, artifact.title || query);
+  };
+  if (maps.length) await showMap(maps[maps.length - 1]);
+  for (const artifact of artifacts) {
+    const card = node("section", "", "artifact-card");
+    card.append(node("strong", artifact.title || "Evidence artifact"));
+    if (artifact.kind === "map" && maps.length > 1) {
+      const button = node("button", "View on map", "artifact-action"); button.type = "button";
+      button.addEventListener("click", () => showMap(artifact).catch(error => setStatus(error.message, "error")));
+      card.append(button);
+    } else if (artifact.kind === "table" || artifact.kind === "chart") {
+      const table = node("table", "", "artifact-table");
+      for (const row of (artifact.rows || []).slice(0, 20)) {
+        const tr = node("tr");
+        Object.values(row).forEach(value => tr.append(node("td", typeof value === "object" ? JSON.stringify(value) : String(value))));
+        table.append(tr);
+      }
+      card.append(table);
+    } else continue;
+    message.append(card);
+  }
+  if (response.receipt?.id) message.append(node("span", `Evidence receipt · ${response.receipt.id}`, "message-receipt"));
+  if (!maps.length) setStatus(response.status === "completed" ? "Evidence workflow completed" : "More evidence or clarification needed");
+  $("conversationThread").scrollTop = $("conversationThread").scrollHeight;
+}
+
+function renderSources() {
+  const root = $("sourceBody");
+  const capabilities = state.capabilities || {};
+  const provenance = capabilities.provenance || {};
+  const coverage = capabilities.coverage || provenance.coverage || {};
+  root.replaceChildren(node("p", datasetDetail()?.name || capabilities.area_name || "Prepared evidence dataset", "source-name"));
+  const details = node("dl", "", "evidence-grid");
+  addDefinition(details, "Image tiles", state.mapData?.tiles?.length || coverage.tile_count || 0);
+  addDefinition(details, "Imagery dates", Array.isArray(coverage.acquisition_dates) && coverage.acquisition_dates.length ? coverage.acquisition_dates.join(", ") : "Unknown in supplied metadata");
+  addDefinition(details, "Model observations", Object.keys(capabilities.supported_concepts || {}).map(pretty).join(", ") || "No cached concepts");
+  addDefinition(details, "Scene retrieval", capabilities.text_similarity_enabled ? "SkyCLIP text–image retrieval available" : "Unavailable in this library");
+  addDefinition(details, "Dataset version", capabilities.dataset_version);
+  root.append(details);
+  root.append(node("h3", "Reference layers"));
+  for (const [id, layer] of Object.entries(capabilities.vector_layers || {})) {
+    const item = node("section", "", "source-item");
+    item.append(node("strong", pretty(id)), node("p", [layer.provenance?.source_name || layer.source || layer.source_name, layer.source_date || layer.provenance?.source_date, layer.license || layer.provenance?.license].filter(Boolean).join(" · ")));
+    if (layer.coverage_note || layer.provenance?.coverage_note) item.append(node("p", layer.coverage_note || layer.provenance.coverage_note));
+    root.append(item);
+  }
+  const attribution = Object.entries(provenance.attribution || state.mapData?.attribution || {}).map(([kind, value]) => `${pretty(kind)}: ${value}`).join("\n");
+  if (attribution) root.append(node("p", attribution, "source-attribution"));
+  root.append(node("p", "Aerial imagery, annotations and vector snapshots may have different dates. Partial coverage and uncertain detections remain visible; no result establishes real-world absence.", "info-note"));
+}
+
+function closeInfo({restoreFocus = true} = {}) {
+  $("sourcePanel").hidden = true; $("helpPanel").hidden = true;
+  document.querySelector(".workspace").inert = false;
+  document.querySelector(".app-rail").inert = false;
+  document.body.classList.remove("info-open");
+  if (restoreFocus) state.infoTrigger?.focus();
+  state.infoTrigger = null;
+}
+
+function openInfo(id, trigger) {
+  closeInfo({restoreFocus: false}); closeEvidence({restoreFocus: false});
+  state.infoTrigger = trigger;
+  $(id).hidden = false;
+  document.querySelector(".workspace").inert = true;
+  document.querySelector(".app-rail").inert = true;
+  document.body.classList.add("info-open");
+  $(id).focus({preventScroll: true});
+}
+
+async function changeDataset() {
+  const previous = state.datasetId;
+  const next = $("datasetSelect").value;
+  if (state.busy || !next || next === previous) return;
+  closeResults();
+  state.conversationId = null;
+  $("conversationThread").replaceChildren();
+  $("exampleSection").hidden = false;
+  setBusy(true); setStatus("Loading the selected study area");
+  try { await loadDataset(next); setStatus(`${state.mapData?.tiles?.length || 0} source tiles ready`); }
+  catch (error) { $("datasetSelect").value = previous; setStatus(error.message, "error"); }
+  finally { setBusy(false); }
+}
+
+function trapDialogFocus(event) {
+  if (event.key !== "Tab" || event.currentTarget.getAttribute("aria-modal") !== "true") return;
+  const items = [...event.currentTarget.querySelectorAll('button:not(:disabled), a[href], input:not(:disabled), textarea:not(:disabled), select:not(:disabled), [tabindex="0"]')];
+  const first = items[0], last = items[items.length - 1];
+  if (!items.length) { event.preventDefault(); return; }
+  if (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) { event.preventDefault(); last.focus(); }
+  else if (!event.shiftKey && (document.activeElement === last || document.activeElement === event.currentTarget)) { event.preventDefault(); first.focus(); }
+}
 
 async function start() {
-  await loadDatasets();
-  await loadDataset(state.datasetId);
+  setStatus("Loading geographic evidence");
+  try {
+    const defaultDataset = await loadDatasets();
+    await loadDataset(defaultDataset);
+    state.ready = true;
+    $("datasetSelect").disabled = false;
+    $("engineStatus").replaceChildren(node("span"), document.createTextNode("Evidence ready"));
+    document.body.classList.add("is-ready");
+    $("query").disabled = false;
+    setStatus(`${state.mapData?.tiles?.length || 0} source tiles ready`);
+    updateSubmit();
+  } catch (error) {
+    state.ready = false;
+    $("datasetName").textContent = "EVIDENCE UNAVAILABLE";
+    $("areaName").textContent = "NOT READY";
+    $("mapLoading").hidden = true;
+    $("engineStatus").replaceChildren(node("span"), document.createTextNode("Evidence unavailable"));
+    setStatus(error.message, "error");
+  }
 }
+
+$("query").addEventListener("input", updateSubmit);
+$("query").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); search(); } });
+$("searchForm").addEventListener("submit", event => { event.preventDefault(); search(); });
+$("fitArea").addEventListener("click", () => fitBounds(state.areaBounds));
+$("closeResults").addEventListener("click", closeResults);
+$("exportResults").addEventListener("click", exportResults);
+$("closeEvidence").addEventListener("click", () => closeEvidence());
+$("datasetSelect").addEventListener("change", changeDataset);
+$("imageryToggle").addEventListener("change", applyLayerVisibility);
+$("vectorsToggle").addEventListener("change", applyLayerVisibility);
+$("satelliteBasemap").addEventListener("click", () => setBasemap("satellite"));
+$("streetBasemap").addEventListener("click", () => setBasemap("street"));
+$("expandMap").addEventListener("click", () => toggleExpandedMap());
+$("expertMode").addEventListener("click", () => setMode("search"));
+$("conversationMode").addEventListener("click", () => setMode("conversation"));
+$("sourcesNav").addEventListener("click", () => openInfo("sourcePanel", $("sourcesNav")));
+$("helpNav").addEventListener("click", () => openInfo("helpPanel", $("helpNav")));
+$("explorerNav").addEventListener("click", () => { closeInfo(); closeEvidence(); fitBounds(state.areaBounds); $("query").focus(); });
+$("closeSources").addEventListener("click", () => closeInfo());
+$("closeHelp").addEventListener("click", () => closeInfo());
+for (const id of ["evidencePanel", "sourcePanel", "helpPanel"]) $(id).addEventListener("keydown", trapDialogFocus);
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  if (!$("sourcePanel").hidden || !$("helpPanel").hidden) closeInfo();
+  else if (!$("evidencePanel").hidden) closeEvidence();
+  else if (document.body.classList.contains("map-expanded")) { toggleExpandedMap(false); $("expandMap").focus(); }
+});
+window.addEventListener("resize", () => state.map?.resize());
+window.addEventListener("beforeunload", () => state.searchController?.abort());
 
 start();

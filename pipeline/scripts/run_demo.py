@@ -14,12 +14,16 @@ from pathlib import Path
 
 
 PIPELINE_DIR = Path(__file__).resolve().parents[1]
-REFERENCE_BUNDLE = PIPELINE_DIR / "data" / "spacenet-grounded"
+REFERENCE_BUNDLE = PIPELINE_DIR / "data" / "spacenet-round1"
+if not (REFERENCE_BUNDLE / "manifest.json").is_file():
+    REFERENCE_BUNDLE = PIPELINE_DIR / "data" / "spacenet-grounded"
 if not (REFERENCE_BUNDLE / "manifest.json").is_file():
     REFERENCE_BUNDLE = PIPELINE_DIR / "data" / "spacenet-urban"
 if not (REFERENCE_BUNDLE / "manifest.json").is_file():
     REFERENCE_BUNDLE = PIPELINE_DIR / "data" / "spacenet-sample"
-DEFAULT_BUNDLE = REFERENCE_BUNDLE if (REFERENCE_BUNDLE / "manifest.json").is_file() else PIPELINE_DIR / "data" / "demo"
+PHOENIX_BUNDLE = PIPELINE_DIR / "data" / "phoenix-demo"
+DEFAULT_BUNDLE = PHOENIX_BUNDLE if (PHOENIX_BUNDLE / "manifest.json").is_file() else (
+    REFERENCE_BUNDLE if (REFERENCE_BUNDLE / "manifest.json").is_file() else PIPELINE_DIR / "data" / "demo")
 DEFAULT_CHECKPOINT = PIPELINE_DIR / "data" / "models" / "SkyCLIP_ViT_B32_top50pct.safetensors"
 
 
@@ -34,6 +38,8 @@ def valid_port(value: str) -> int:
 
 
 def configure_environment() -> tuple[Path, Path]:
+    from dotenv import load_dotenv
+    load_dotenv(PIPELINE_DIR / ".env", override=False, interpolate=False)
     os.environ.setdefault("BUNDLE_DIR", str(DEFAULT_BUNDLE))
     os.environ.setdefault("ENCODER_CHECKPOINT", str(DEFAULT_CHECKPOINT))
     for name in ("BUNDLE_DIR", "ENCODER_CHECKPOINT"):
