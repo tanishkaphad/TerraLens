@@ -352,8 +352,14 @@ async function loadCapabilities(datasetId) {
   state.capabilities = data;
   renderExamples(data);
   state.assistant = data.conversation || state.assistant;
-  $("conversationMode").disabled = !state.assistant?.configured;
-  $("conversationMode").title = state.assistant?.configured ? "Ask questions and follow up through the configured conversation service" : "Conversation service is not configured. Evidence search is available.";
+  const configured = state.assistant?.configured;
+  const provider = state.assistant?.provider || "groq";
+  const model = state.assistant?.model || "";
+  const modelLabel = model ? ` (${model})` : "";
+  $("conversationMode").disabled = !configured;
+  $("conversationMode").title = configured
+    ? `Ask geospatial questions and follow up \u00b7 ${provider.charAt(0).toUpperCase() + provider.slice(1)}${modelLabel} ready`
+    : `GIS conversation not configured \u2014 add ${provider.toUpperCase()}_API_KEY to pipeline/.env. Evidence search still available.`;
   if (data.area_name) renderDatasetIdentity(datasetId, data.area_name);
 }
 
@@ -938,6 +944,28 @@ function setMode(mode) {
   $("query").focus();
 }
 
+async function submitConversation() {
+  const query = $("query").value.trim();
+  if (!state.ready || state.busy || query.length < 3) return;
+  state.searchController?.abort();
+  const controller = new AbortController();
+  state.searchController = controller;
+  setBusy(true);
+  startBusyStatus();
+  appendMessage("user", query);
+  $("exampleSection").hidden = true;
+  try {
+    await conversationSearch(query, controller);
+    $("query").value = "";
+  } catch (error) {
+    stopBusyStatus();
+    if (error.name !== "AbortError") { setStatus(error.message, "error"); appendMessage("assistant", error.message, "message-error"); }
+  } finally {
+    if (state.searchController === controller) state.searchController = null;
+    setBusy(false);
+  }
+}
+
 async function conversationSearch(query, controller) {
   const body = {message: query, dataset_id: state.datasetId};
   if (state.conversationId) body.conversation_id = state.conversationId;
@@ -1078,8 +1106,8 @@ async function start() {
 }
 
 $("query").addEventListener("input", updateSubmit);
-$("query").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); search(); } });
-$("searchForm").addEventListener("submit", event => { event.preventDefault(); search(); });
+$("query").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); state.mode === "conversation" ? submitConversation() : search(); } });
+$("searchForm").addEventListener("submit", event => { event.preventDefault(); state.mode === "conversation" ? submitConversation() : search(); });
 $("fitArea").addEventListener("click", () => fitBounds(state.areaBounds));
 $("closeResults").addEventListener("click", closeResults);
 $("exportResults").addEventListener("click", exportResults);

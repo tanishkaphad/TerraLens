@@ -421,15 +421,21 @@ def parse_search_plan(query: str | dict | SearchPlan, catalog: dict[str, Any], p
     previous = validate_search_plan(previous_plan, catalog).model_dump() if previous_plan else None
     from .assistant import PROVIDERS, _call, status
     connection = status()
-    provider_name = connection.get("provider") or "openai"
+    # Default to the configured provider (groq by default); allow explicit SEARCH_PARSER_* overrides
+    provider_name = connection.get("provider") or "groq"
     provider = PROVIDERS.get(provider_name, {})
     model = os.getenv("SEARCH_PARSER_MODEL") or connection.get("model")
     endpoint = os.getenv("SEARCH_PARSER_BASE_URL") or provider.get("base_url")
-    key = os.getenv("SEARCH_PARSER_API_KEY") or os.getenv(provider.get("key", "OPENAI_API_KEY"))
+    default_key_env = provider.get("key", "GROQ_API_KEY")
+    key = os.getenv("SEARCH_PARSER_API_KEY") or os.getenv(default_key_env, "")
     configured = bool(connection.get("configured") or os.getenv("SEARCH_PARSER_BASE_URL") or os.getenv("SEARCH_PARSER_API_KEY"))
     if client is None and (not model or not configured):
-        raise SearchPlanError("A structured language interpreter is not configured. Use the structured query builder; your original question has been preserved.",
-            "needs_structured_plan", {"original_query": query, "schema": SearchPlan.model_json_schema()})
+        raise SearchPlanError(
+            "A structured language interpreter is not configured. "
+            "Set LLM_PROVIDER=groq and GROQ_API_KEY in pipeline/.env, then set SEARCH_PARSER_ENABLED=1. "
+            "Your original question has been preserved.",
+            "needs_structured_plan", {"original_query": query, "schema": SearchPlan.model_json_schema()},
+        )
     stage = "client_setup"
     try:
         from openai import OpenAI
