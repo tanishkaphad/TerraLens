@@ -1,12 +1,30 @@
 # TerraLens: Multimodal Infrastructure Search with Verifiable Spatial Evidence
 
-Research and implementation workflow for GEOAI 05. Prepared 9 October 2026.
+Research and implementation workflow for GEOAI 05. Updated 9 October 2026 after reviewing the implementation and the proposed Bhoonidhi alternatives.
 
 **Recommended pipeline:** natural language -> validated query plan -> SkyCLIP image retrieval -> OWLv2 object evidence -> association with OSM features -> deterministic spatial checks -> interactive map, evidence cards and GeoJSON.
 
 **Recommended eight-hour product:** a public application covering one small, real area, with live text search and spatial filtering over genuine, precomputed image embeddings and detections. Every result shows what was observed, which map feature was matched, and how the spatial condition was evaluated.
 
 The core now has a locally exercised implementation over a tiny real NAIP/OSM corpus: model embeddings and detections, typed search, metric joins, conversational radius changes, an interactive aerial map and complete GeoJSON exports. See [implementation checks](docs/validation.md) for exact counts and limitations. Independent visual accuracy, hosted accounts and public deployment are still unverified. The broader design and eight-hour public-delivery target remain conditional on data quality, a small team, working accounts and adequate hosting resources.
+
+## 0. Current progress and the addition being planned
+
+Implementation baseline: commit `cedad797007ef0382226f9b2bb2982343bb0dd6d`. This update reconciles the plan with repository code and recorded checks; it does not implement new provider connectors or rerun the model evaluation.
+
+| Area | Current evidence | Remaining work |
+| --- | --- | --- |
+| Real imagery and vectors | Planetary Computer NAIP crop from Sacramento plus an actual OSM extract | Suitable high-resolution Pune imagery has not been established |
+| Open visual models | SkyCLIP embeddings and OWLv2 detections ran on four overlapping tiles; 152 deduplicated model candidates | Independent precision/recall, registration review and geographic holdout |
+| Search and spatial joins | Roof and pool proximity queries, constrained plans, radius follow-ups, evidence and complete GeoJSON exports exercised locally | Broader supported concepts require new data and evaluation |
+| Application | FastAPI serves a static HTML/CSS/JavaScript MapLibre interface from the same origin | Public hosting, resource measurements and restart checks |
+| Verification | Recorded run: 54 tests passed; real local API and browser checks completed | Software tests do not establish visual accuracy or public availability |
+| Language interpretation | Conservative templates work without credentials; optional structured language-model parser exists | Live language API integration has not been exercised |
+| Imagery-provider expansion | Existing script fetches a selected Planetary Computer NAIP sample | Interactive imagery discovery, Earth Search/CDSE adapters and task-suitability checks are proposed below |
+
+**Decision:** add an imagery-discovery layer around the working engine. Keep the NAIP visual-spatial demonstration, add bounded India/Pune catalog search next, and require an explicit suitability decision before any selected imagery enters object preparation. Discovery of an image is not a detection result.
+
+The first new adapter should be **Element 84 Earth Search** for Sentinel-2 catalog metadata. **Copernicus Data Space (CDSE)** is the next alternate catalog. Investigate **OpenAerialMap** for a usable high-resolution Indian asset with a fixed time budget. Bhoonidhi, Earth Engine and commercial providers remain optional until their access and product suitability are established. These choices are implementation priorities, not claims that the new connections already work.
 
 ## 1. What the problem actually requires
 
@@ -53,7 +71,7 @@ Use the product description **“Evidence-backed geospatial discovery”**. Gove
 
 The following sources establish that remote-sensing language retrieval, grounding, conversational GIS and combined geospatial retrieval already exist. The final column is our interpretation of what the inspected work establishes for this particular product; it is not a claim that those systems could never support an extension.
 
-| Primary source | Established contribution | Remaining question relevant to GeoVerify-X |
+| Primary source | Established contribution | Remaining question relevant to TerraLens |
 | --- | --- | --- |
 | [SkyScript / SkyCLIP, AAAI 2024](https://arxiv.org/abs/2312.12856) | Remote-sensing image-text data and domain-adapted retrieval/classification | Does a retrieved scene contain the correct individual object satisfying every geographic clause? |
 | [GeoChat, CVPR 2024](https://openaccess.thecvf.com/content/CVPR2024/papers/Kuckreja_GeoChat_Grounded_Large_Vision-Language_Model_for_Remote_Sensing_CVPR_2024_paper.pdf) | Remote-sensing conversation and visually grounded responses | How do image-coordinate results become traceable joins with independent map features? |
@@ -85,6 +103,7 @@ This is narrower and more defensible than claiming that “LLMs cannot do GIS”
 | 6 | Human correction with reproducible reruns | Supports review and captures useful labels | Later | Correction effort and improvement on a separate test set |
 | 7 | Temporal change confirmation | Distinguishes visible appearance from an observed change | Later; needs paired imagery | Change precision/recall with temporal ground truth |
 | 8 | Learned calibration or conformal prediction | Could provide empirically supported risk control | Research phase | Calibration and coverage under geographic distribution shift |
+| Extension | Task-aware imagery selection | Explains which available images can support the requested analysis and why others cannot | One catalog adapter after release-critical checks | Unsuitable-source rejection, unknown handling and correct source provenance |
 
 The first three are useful engineering differentiation. None is automatically a new scientific method. The strongest research hypothesis is that an auditable evidence chain plus selective abstention improves reliability at a measurable coverage cost.
 
@@ -92,16 +111,17 @@ The first three are useful engineering differentiation. None is automatically a 
 
 | Component | Selected default | Reason and boundary |
 | --- | --- | --- |
-| UI | React, TypeScript, Vite, Tailwind, MapLibre GL JS | Chat, map, evidence inspection and export in one screen |
+| UI | Existing static HTML/CSS/JavaScript with MapLibre GL JS | Already served by FastAPI; retain the working interface |
 | Backend | FastAPI with Pydantic | Typed contracts and small, explicit execution functions |
-| Language interpretation | Backend OpenAI API with Structured Outputs | Produce a constrained plan; never use it as the image detector or distance calculator |
+| Language interpretation | Conservative templates; optional backend structured language-model parser | Current tested path needs no API key; validate every plan on the server |
 | Image/text retrieval | SkyCLIP ViT-B/32 through a compatible OpenCLIP setup | Remote-sensing candidate; smaller integration target than a large conversational VLM |
 | Grounding | `google/owlv2-base-patch16-ensemble` through Transformers | Text-conditioned object boxes; validate aerial performance before committing |
 | Small search index | Normalized NumPy embedding matrix | Enough for the initial corpus; no separate vector database |
 | Image coordinates | Rasterio and pyproj | Preserve raster transforms and CRS conversions |
 | Spatial execution | GeoPandas and Shapely, using a local metric CRS | Straightforward proximity, intersection and attribute joins |
 | Data | Frozen imagery, vectors, model outputs and a versioned manifest | Reproducible and independent of live data-service availability during judging |
-| Public hosting | Vercel frontend and Render FastAPI service | Matches the original deployment direction |
+| Imagery discovery, proposed | Earth Search STAC first; CDSE adapter next | Metadata search and suitability assessment precede bounded offline preparation |
+| Public hosting, pending | One FastAPI service serving both API and static UI; Render is a candidate | Preserve the current deployment shape; size the host from measured memory |
 | Persistent mutable records | Supabase only if saved reviews/history are included | Not required for the initial read-only discovery application |
 
 The [SkyScript repository](https://github.com/wangzhecheng/SkyScript) publishes a SkyCLIP ViT-B/32 checkpoint. [OpenCLIP](https://github.com/mlfoundations/open_clip) documents separate image/text encoding and normalized similarity. Give checkpoint loading and a small sanity evaluation a fixed time budget. If compatibility fails, use one pinned generic OpenCLIP ViT-B/32 checkpoint and regenerate both sides of the index. A remote-sensing model is the initial choice, not an assumed accuracy winner.
@@ -110,11 +130,16 @@ The [SkyScript repository](https://github.com/wangzhecheng/SkyScript) publishes 
 
 ```mermaid
 flowchart TD
-    A[Licensed imagery and OSM snapshot] --> B[Validate coverage, dates and coordinates]
-    B --> C[Offline image embeddings and real detections]
+    U[User question or follow-up] --> P[Validated intent and parameters]
+    P -->|Search prepared evidence: implemented| R[Text ranking and cached candidates]
+    P -->|Discover imagery: proposed| S[Provider adapters and metadata search]
+    S --> K[Catalog footprints, dates, resolution and access]
+    K --> T[Task suitability and source selection]
+    T -->|Eligible for object preparation| B[Bounded raster crop and matching OSM snapshot]
+    T -->|Ineligible or unknown| N[Explain missing evidence or offer a supported task]
+    B --> V[Validate imagery, coverage, dates and coordinates]
+    V --> C[Offline image embeddings and real detections]
     C --> D[Frozen evidence bundle]
-    U[User question or follow-up] --> P[Typed query plan and capability check]
-    P --> R[Image retrieval and candidate selection]
     D --> R
     R --> I[Detection-to-feature association]
     I --> G[Metric spatial predicates]
@@ -123,9 +148,11 @@ flowchart TD
     O --> U
 ```
 
+The diagram includes planned provider routing. The existing path starts with the local prepared bundle. Future vegetation or water-change analysis needs a separate multispectral/temporal processor; it must not route every satellite product through an RGB object detector.
+
 **Inference split:** image encoding and supported-class grounding happen during preparation. Text encoding, query interpretation, ranking, joins and conversational updates happen online. The interface states: “Precomputed model detections; live search and spatial filtering.” New visual concepts remain searchable at tile level, but require an inference worker before they can receive grounded object-level spatial answers.
 
-This deliberately bounds the MVP. It is not unrestricted live grounding for arbitrary text. If hackathon rules specifically require per-request detector execution, add a provisioned inference worker and test it by Hour 2, or report that requirement as incomplete.
+This deliberately bounds the MVP. It is not unrestricted live grounding for arbitrary text. If hackathon rules specifically require per-request detector execution, a provisioned and tested inference worker becomes an additional release requirement; until then, report that requirement as incomplete.
 
 ## 5. Data selection: resolve the largest risk first
 
@@ -138,6 +165,63 @@ This deliberately bounds the MVP. It is not unrestricted live grounding for arbi
 
 **Implementation update (9 October 2026):** the initial real-data diagnostic sample is a 600-metre-square Sacramento / Land Park crop, not Pune. The selected NAIP item is `ca_m_3812129_sw_10_060_20220621`: 1,000 × 1,000 RGB pixels, 0.6-metre ground sampling distance, EPSG:26910, acquired 21 June 2022. Actual OSM roads and buildings were extracted with a 525-metre margin on 9 October 2026. The extract contains 1,079 road ways and 2,972 building ways; the queried waterway layer is empty and is not configured as usable drainage evidence. These dates are different epochs and must remain visible. See [dataset notes](docs/datasets.md) and [runnable pipeline](pipeline/README.md).
 
+### Provider choices for the proposed extension
+
+Resolution belongs to the selected product and band, not to the provider. A global catalog does not guarantee usable imagery for the chosen area, dates or object. The following priorities use provider documentation reviewed on 9 October 2026; they are not live Pune search results.
+
+| Provider | Role in TerraLens | Access and suitability boundary | Priority |
+| --- | --- | --- | --- |
+| Microsoft Planetary Computer | Retain the working NAIP source and generalize its existing fetch path later | NAIP supplies US aerial imagery; it does not solve Pune coverage. Asset access can require expiring signed URLs. [Official SDK](https://github.com/microsoft/planetary-computer-sdk-for-python) | Existing sample source |
+| Element 84 Earth Search | First new catalog adapter; search Sentinel-2 metadata over Pune using area and dates | Free-to-use STAC catalog, including Sentinel and Landsat collections; catalog availability does not establish rooftop detail. [Provider documentation](https://element84.com/earth-search/) | Next bounded feature |
+| Copernicus Data Space | Alternate Sentinel catalog, with later processing options | STAC/OData provide catalog access; Sentinel Hub/openEO provide processing interfaces. Keep download authentication and service quotas separate from metadata search. [API overview](https://documentation.dataspace.copernicus.eu/APIs.html), [STAC reference](https://documentation.dataspace.copernicus.eu/APIs/STAC.html) | After first adapter |
+| OpenAerialMap | Search for a georeferenced, sufficiently detailed Indian aerial asset | Metadata API and open imagery; OIN imagery is described as CC BY 4.0 with attribution. Local coverage, capture date and pixel quality still need checking. [API](https://docs.openaerialmap.org/api/api/), [licensing](https://openaerialmap.org/about/) | Short coverage investigation |
+| ISRO Bhoonidhi | Optional Indian product catalog/download connector | Registered credentials and applicable API enablement/product access must be available before integration. [API reference](https://bhoonidhi.nrsc.gov.in/bhoonidhi-api/), [registration](https://bhoonidhi.nrsc.gov.in/bhoonidhi/registration.html) | Access-dependent |
+| Google Earth Engine | Later managed processing for larger environmental tasks | Requires a registered Cloud project; noncommercial eligibility and verification apply. It is not automatically a source of fine rooftop imagery. [Access requirements](https://developers.google.com/earth-engine/guides/access) | Later processing option |
+| NASA Earthdata / USGS EarthExplorer | Later mission-specific and historical discovery | Use their own collection/search/download contracts, not an assumed interchangeable STAC endpoint. [NASA CMR](https://cmr.earthdata.nasa.gov/search/site/docs/search/api.html), [USGS M2M](https://m2m.cr.usgs.gov/) | Deferred |
+| Planet / Airbus OneAtlas | Optional route to finer Indian imagery when suitable licensed access already exists | Validate product, acquisition, entitlement, processing rights and display/export terms. Do not make a purchase or new subscription a demo prerequisite. [Planet APIs](https://docs.planet.com/develop/apis/), [OneAtlas API](https://api.oneatlas.airbus.com/) | Deferred |
+
+### Two separate user tasks
+
+**Search prepared evidence, implemented:** “Find swimming pools within 100 metres of roads.” Search the selected immutable bundle, return grounded candidates and execute spatial checks. Existing `catalog_scan` means scanning cached object evidence; it does not mean searching a satellite provider catalog. Existing `explore` means tile retrieval over the prepared bundle.
+
+**Discover source imagery, proposed:** “Find available satellite imagery of Pune from the last six months.” Resolve a validated area and explicit date interval, search a configured catalog, and return scene footprints, acquisition dates, available bands/resolution, cloud metadata, access conditions and source links. Label these as **available imagery**, never as detected infrastructure.
+
+Use a separate `discover_imagery` intent and schema. Resolve relative dates at request time with the reference timestamp and timezone retained; show the resulting interval. Use a reviewed Pune area preset or user-drawn polygon, not coordinates invented by the language model. A change such as “only the last month” must preserve the area, collection and other filters. Switching between discovery and object search must be explicit.
+
+Start with one collection and bounded pages. Earth Search's documented API is `https://earth-search.aws.element84.com/v1`. CDSE documents `https://stac.dataspace.copernicus.eu/v1/search`; inspect each catalog's collections, conformance and queryable fields before building requests. The latter's free-text `q` extension applies to collection search, not item search. Translate language into supported spatial/date/property filters rather than forwarding the prompt. [Earth Search](https://element84.com/earth-search/), [CDSE STAC](https://documentation.dataspace.copernicus.eu/APIs/STAC.html)
+
+### Task suitability before full preparation or grounding
+
+Return separate access and suitability states. Successful catalog search does not mean a raster can be downloaded, reused, or interpreted at the required scale.
+
+| State, proposed | Meaning | Next step |
+| --- | --- | --- |
+| `eligible_for_preparation` | Metadata, rights and a pixel sample support attempting the requested task | Prepare a bounded crop and evaluate the model; accuracy remains unproven |
+| `ineligible_for_task` | Known mismatch, such as insufficient detail or missing required bands | Explain the mismatch and offer an appropriate source/task |
+| `unknown` | Required metadata, permissions, sample pixels or coverage checks are missing | Obtain the missing evidence; do not silently pass the gate |
+| `prepared_for_concept` | A versioned bundle contains outputs for the declared concept | Search with its recorded model, coverage and review limitations |
+
+Assess native resolution per band, effective resolution after model resizing, target size, blur, cloud/shadow/nodata, valid coverage of the actual AOI, georeferencing, acquisition time and permitted use. Scene footprint intersection and scene-wide cloud percentage alone do not prove clear pixels over Pune. Missing cloud metadata is unknown, not zero. Upsampling cannot recover missing object detail.
+
+Sentinel-2 has bands at 10, 20 and 60 metres; visible bands B02/B03/B04 and near-infrared B08 are 10 metres. It is a reasonable candidate for larger-area environmental work. A two-metre object spans only 0.2 of a 10-metre pixel, so those products cannot support our individual-panel or pothole-severity promises. Do not apply one universal resolution cutoff to all objects or claim that sub-metre pixels guarantee accurate detections. [Sentinel-2 instrument and products](https://documentation.dataspace.copernicus.eu/Data/SentinelMissions/Sentinel2.html)
+
+For Pune rooftop search, retain “suitable source not yet established” until an actual organizer, OAM, permitted aerial or commercial asset passes this gate and local visual review. Free global Sentinel coverage is useful for discovery but does not complete that requirement.
+
+### Adapter and ingestion contract, proposed
+
+Each adapter should normalize metadata search and authorized asset resolution while preserving the original provider record. Keep these fields:
+
+- Provider, collection and item IDs; original product identity; footprint and source links.
+- Acquisition timestamp or interval, separate from publication and retrieval timestamps.
+- Sensor, processing level, bands, native resolutions, CRS and transform when available.
+- Cloud/nodata metadata, with unavailable values explicit; sampled usable AOI coverage when checked.
+- Licence, attribution, access requirements and decisions about processing, display and export.
+- Suitability state, task, reason codes and checks still pending.
+
+Use provider-specific signing/authentication; refresh expiring asset URLs on the backend and retain stable source IDs instead of signed secrets in exports. Download only configured-provider assets with bounded area, bytes, time and retries. Restrict endpoint/asset hosts so a natural-language request cannot become an arbitrary server-side URL fetch. Return provider failures separately from a successful empty search and preserve pagination/truncation.
+
+When two providers index the same underlying acquisition, link duplicate product identities; they are not independent observations. Cache catalog metadata with retrieval time and expiry separately from immutable prepared evidence. The initial feature should only search and assess metadata: it can reject a known mismatch or report missing checks, but eligibility still requires the pixel sample and rights review. Complete those checks offline for selected assets, then use the existing preparation scripts. An asynchronous ingestion service is a later convenience. A new raster/model/configuration requires a new bundle fingerprint before it becomes selectable in object search.
+
 ### Initial corpus budget
 
 - One bounded area; begin with a tiny diagnostic bundle (the current sample uses four overlapping 640-pixel windows), then expand toward 50–200 tiles only after checking model quality and runtime cost.
@@ -149,7 +233,7 @@ This deliberately bounds the MVP. It is not unrestricted live grounding for arbi
 
 OSM vectors are analysis inputs; rendered basemap tiles are a display service. Preserve OSM attribution and applicable data notices. Do not bulk-download the standard OSM tile service to build the imagery corpus. [OSM attribution](https://www.openstreetmap.org/copyright), [tile policy](https://operations.osmfoundation.org/policies/tiles/)
 
-### Data gate: complete within 45 minutes
+### Data gate for each new source: initial 45-minute timebox
 
 | Check | Pass condition | If it fails |
 | --- | --- | --- |
@@ -159,7 +243,7 @@ OSM vectors are analysis inputs; rendered basemap tiles are a display service. P
 | Vector coverage | Relevant local reference features exist | Narrow the query family and disclose missing layers |
 | Provenance | Source, date or explicit unknown, terms and attribution recorded | Do not publish that asset until resolved |
 
-**Model gate: complete by 90 minutes.** Produce one real embedding and grounded detections on representative positive and negative imagery. If loading or quality fails, test the single model fallback and reduce corpus size. This follows the 45-minute data gate and must pass before the public end-to-end milestone.
+**Model gate for a new source or concept:** produce one real embedding and grounded detections on representative positive and negative imagery. The existing model pair has run on NAIP; suitability does not automatically transfer to another sensor or geography. Timebox a new-source diagnostic to a further 45 minutes. If loading or quality fails, reduce scope or test the single fallback before expanding the corpus.
 
 Resolution is a physical limit: a 2-metre object spans about 7 pixels in 0.3-metre imagery, but only 2 pixels in 1-metre imagery before any resizing. These are illustrative calculations, not detection guarantees. Larger arrays may be visible where individual panels are not. Pothole severity is outside this MVP.
 
@@ -203,7 +287,7 @@ For rooftop panels, identify candidate building footprints overlapping the panel
 
 Keep detection geometry, associated building footprint and reference-feature geometry separate. A successful association does not turn the detector box into a measured roof boundary. Only unambiguous associations enter strict compound matches; ambiguous observations remain inspectable candidates.
 
-### Required artifacts
+### Prepared artifacts and derived evidence
 
 | Artifact | Required content |
 | --- | --- |
@@ -211,47 +295,37 @@ Keep detection geometry, associated building footprint and reference-feature geo
 | `tiles.json` | Tile ID, source ID, checksum, size, transform, resolution, acquisition date, crop/preview paths |
 | `embeddings.npy` | Normalized vectors with a stable tile/crop row mapping |
 | `detections.geojson` | Geographic detections, original pixel boxes, scores, prompts, model version, evidence type |
-| `vectors.gpkg` | Reference layers, OSM IDs/tags/version where available, extraction timestamp |
-| `associations.json` | Detection-to-feature links, rule/version, overlap measurements and ambiguity |
-| `capabilities.json` | Supported concepts/relations, observed coverage, unavailable attributes and operational limits |
-| `evaluation.json` | Frozen development/test definitions and measured results once available |
+| `vectors/*.geojson` | Current roads/buildings layers, OSM IDs/tags and recorded source snapshot; GeoPackage remains an optional future format |
+| Query response and export | Associations are computed during execution, with object links, overlap and ambiguity; there is no required `associations.json` file |
+| Manifest plus `/api/capabilities` | Supported concepts/relations, coverage, unavailable attributes and operational limits; derived from the loaded bundle |
+| `docs/validation.md` and `docs/verification-receipt.json` | Recorded implementation checks; independent annotations and held-out visual metrics are still pending |
 
 ## 7. Online query workflow
 
 ### Step 1: Parse language into a typed plan
 
-Send the question, previous validated plan and capability manifest to the language model. Request a schema-constrained response. Still validate semantics, entity names and numerical bounds on the server; schema validity does not make an interpretation correct. Handle refusal, incomplete output and timeout explicitly. [OpenAI Structured Outputs](https://developers.openai.com/api/docs/guides/structured-outputs)
+The current default parser recognizes supported templates and radius-only follow-ups, rejecting clauses it cannot preserve. An optional backend language-model parser accepts the question, previous plan and capability manifest and requests a schema-constrained response. Still validate semantics, entity names and numerical bounds on the server; schema validity does not make an interpretation correct. Handle refusal, incomplete output and timeout explicitly. The optional provider-backed path has not yet been exercised live. [Structured Outputs reference](https://developers.openai.com/api/docs/guides/structured-outputs)
 
-Illustrative plan for the solar example; this is not a claim that the eventual data supports every condition:
+The current `QueryPlan` contract for a supported roof query is:
 
 ```json
 {
-  "schema_version": "1",
-  "aoi_id": "selected_demo_area",
-  "dataset_version": "frozen_demo_v1",
-  "mode": "catalog_scan",
-  "subject": "building",
-  "visual": {
-    "concept": "rooftop_solar_panels",
-    "association": "same_building"
-  },
-  "attributes": [
-    {"field": "building_use", "operator": "equals", "value": "commercial"}
-  ],
-  "relation": {
-    "operator": "within_distance",
-    "reference": "open_drain",
-    "distance_m": 200,
-    "measure_from": "building_footprint"
-  },
-  "unknown_policy": "separate",
-  "page_size": 50
+  "query_type": "objects",
+  "concept_id": "building_roofs",
+  "visual_query": "building roofs",
+  "reference_layer": "roads",
+  "predicate": "within_distance",
+  "distance_m": 100,
+  "attributes": [],
+  "unsupported_conditions": []
 }
 ```
 
-The server owns the actual layer IDs, attribute mappings, CRS and operation implementations. Allow only declared operations: `within_distance`, `intersects`, `within`, and a small set of attribute comparisons. Reject arbitrary SQL, Python, layer paths and model-generated coordinates.
+The request envelope holds `mode`, `dataset_version`, pagination and either a query or the exact plan. The running service currently selects one bundle; arbitrary AOI/date selection and the discovery intent are planned extensions. The commercial/solar/drain example from Section 1 remains unsupported by this bundle.
 
-Resolve ambiguous “near” into a visible distance choice. Resolve an unspecified area against the selected map area. A follow-up like “make that 100 metres” becomes a validated patch to `relation.distance_m`; preserve the dataset, subject, attributes and all other conditions. Show the change before explaining the new results.
+The server owns actual layer IDs, attribute mappings, CRS and operation implementations. Current predicates are `within_distance` and `intersects`; attribute comparisons are `equals` and `contains` against declared fields. Containment is a future extension. Reject arbitrary SQL, Python, layer paths and model-generated coordinates.
+
+Require an explicit distance for ambiguous “near.” A follow-up like “make that 25 metres” becomes a validated patch to `distance_m`; preserve the concept, attributes, reference and all other conditions. Show the change before explaining the new results. Keep the displayed dataset version attached to subsequent pagination and export.
 
 ### Step 2: Check capabilities and evidence availability
 
@@ -331,18 +405,31 @@ Distance sensitivity does not solve uncertain object identity, missing drains, u
 
 ## 9. API, export and interface contract
 
-### Minimal endpoints
+### Implemented endpoints
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | Process liveness |
 | `GET /ready` | Dataset loaded, versions compatible, text encoder ready |
-| `GET /capabilities` | AOI, layers, concepts, dates, modes and limits |
-| `POST /query` | Parse or refine a plan and return execution results |
-| `GET /evidence/{id}` | Source imagery, object geometry and provenance |
-| `POST /export` | Re-execute a validated plan/version and stream GeoJSON |
+| `GET /api/capabilities` | AOI, layers, concepts, dates, modes, parser and limits |
+| `POST /api/query` | Parse/refine a query or execute an exact validated plan |
+| `GET /api/map` | Bounded imagery/vector display with coverage and truncation metadata |
+| `GET /api/assets/{tile_id}` | Original prepared tile image used by map and evidence views |
+| `POST /api/export` | Re-execute the plan and return complete GeoJSON for the selected mode |
+| `GET /api/export` | Browser attachment download using the serialized plan and displayed dataset version |
 
-Responses include the plan and dataset version, stable evidence IDs, per-stage timings, matches, uncertain candidates, coverage and truncation. Cache keys include the canonical plan, dataset, checkpoint and threshold versions. Do not reuse a response after changing any of those inputs.
+Evidence geometry and provenance travel in query/export responses; a separate `/evidence/{id}` endpoint is not implemented. A mismatched supplied dataset version returns 409 rather than silently exporting different data.
+
+### Proposed imagery endpoints, not implemented
+
+| Endpoint | Proposed responsibility |
+| --- | --- |
+| `POST /api/imagery/search` | Validate a discovery plan, query the configured provider and return normalized metadata, footprint features and pagination |
+| `POST /api/imagery/assess` | Assess selected provider item IDs against a declared task; return suitability and reasons without asserting detections |
+
+Do not send arbitrary download URLs from the client. Resolve selected provider/item identities on the backend. Start with offline preparation of selected assets; add a bounded preparation job/status API only when interactive ingestion is actually needed.
+
+Prepared-evidence query responses include the plan and dataset version, stable evidence IDs, execution timings, matches, uncertain candidates, coverage and truncation. Any future result cache must key on the canonical plan, dataset, checkpoint and threshold versions. Do not reuse a response after changing any of those inputs. A persistent query cache is not currently implemented.
 
 Use a read-only, reproducible demo first: immutable artifacts are bundled or fetched from durable object storage; query results and exports are generated on demand. Session history can stay in browser memory. If persistent reviews or shared saved searches are introduced, store them in a real database; do not promise persistence from an ephemeral backend filesystem.
 
@@ -362,19 +449,23 @@ The UI should offer matches-only and matches-plus-uncertain export modes. Preser
 6. A follow-up that changes one condition and displays added/removed results.
 7. GeoJSON download with the same conditions and dataset version.
 
+For the proposed discovery view, show a separate list of imagery products with footprints, acquisition dates, native resolution and suitability reasons. Selecting a scene previews its metadata; it does not create a new set of detected infrastructure. Keep current prepared-bundle search available when a catalog provider is unavailable.
+
 Always include the geographic coordinates or a copyable location for a selected match. Keep source attributions visible. An unavailable basemap must not prevent inspecting evidence or downloading results.
 
-### Suggested implementation layout
+### Current implementation layout
 
 ```text
-frontend/src/       Map, chat, result cards, evidence drawer, export
-backend/app/        API, schemas, parser, retrieval, spatial executor, evidence
-pipeline/           Prepare imagery, embed, ground, associate, validate bundle
-data/               Frozen manifest and small permitted demo artifacts
-eval/               Development cases, held-out cases, metric reports
+pipeline/terralens/         FastAPI, bundle loader, typed planner, spatial engine
+pipeline/terralens/static/  Map, chat, results, evidence inspection and export
+pipeline/scripts/          Source fetching, model setup, preparation and verification
+pipeline/tests/            Preparation and backend regression cases
+pipeline/data/             Ignored local source/prepared data and validation outputs
+docs/                      Dataset notes and recorded verification evidence
+workflow.md                Architecture, current status and remaining work
 ```
 
-Separate heavy offline dependencies from the online backend where practical. Pin versions that actually pass the first model-loading test; this document does not assert a tested dependency lockfile.
+The repository includes requirements and a lockfile for the exercised local environment; portability and hosted memory still require verification. A future `pipeline/terralens/providers/` module can isolate catalog adapters and suitability logic. That directory is a proposed change, not an existing component. Separate heavy offline dependencies from the serving environment where practical.
 
 ## 10. Deployment workflow and operational limits
 
@@ -382,44 +473,43 @@ Deploy the smallest real end-to-end slice early: a few actual tiles, one support
 
 | Stage | Action | Verification |
 | --- | --- | --- |
-| First deployment | React on Vercel; FastAPI on Render; frozen small artifact bundle | Public frontend and ready endpoint respond |
+| First deployment | Serve the existing static interface and FastAPI from one host with a frozen artifact bundle | Public UI and ready endpoint respond |
 | First real query | Load compatible text encoder, embeddings and actual detections | Typed prompt returns a real crop and geographic evidence |
 | Spatial integration | Run one supported metric relationship | Displayed distance agrees with independently checked geometry |
 | Release candidate | Freeze data/model/threshold versions | Fresh browser session completes query, refinement and export |
 
 [Render supports FastAPI deployment](https://render.com/docs/deploy-fastapi). Its [free-service documentation](https://render.com/docs/free) describes idle spin-down after 15 minutes, roughly one-minute wake-up and non-persistent runtime filesystem changes. Size an always-on backend from measured peak memory if available; do not assume a free instance can load the chosen text encoder. No paid service is provisioned by this plan.
 
-The backend may load both model towers unless explicitly reduced to a text-only serving path. Benchmark actual cold start, peak memory and warm-query latency in Hour 1. Keep image grounding offline for the default deployment. Do not put heavyweight inference into Vercel frontend functions; [function limits](https://vercel.com/docs/functions/limitations) apply independently of successful static-site deployment.
+The backend may load both model towers unless explicitly reduced to a text-only serving path. Benchmark actual cold start, peak memory and warm-query latency before choosing host capacity. Keep image grounding offline for the default deployment. A future Vercel frontend can call the same backend if a separate frontend deployment becomes useful; a React rewrite is not a release prerequisite.
 
-Keep API credentials only in backend configuration. Limit request length, AOI size, distance and result count; set timeouts and rate limits. If using two origins, configure the exact frontend origin for CORS. Avoid live OSM downloads and new imagery/model downloads in the interactive request path.
+Keep API credentials only in backend configuration. Limit request length, AOI size, distance and result count; set timeouts and rate limits. If using two origins, configure the exact frontend origin for CORS. Avoid live OSM downloads and new imagery/model downloads in the interactive object-search path. The proposed catalog search makes bounded metadata requests with explicit provider error states; it must not disrupt the loaded evidence bundle.
 
 If the text model does not fit the selected host, reduce the model choice and regenerate embeddings, or provision adequate backend capacity. A fixed prompt catalogue is a disclosed degraded mode, not equivalent to unrestricted text-image search. If a language API fails, an explicit form or documented template parser can preserve supported spatial operations while general language interpretation is unavailable.
 
-Supabase/PostGIS becomes valuable for growing datasets, concurrent writes, saved reviews and durable shared queries. It is an extension point rather than a prerequisite for 200 read-only tiles. If the two-service deployment causes avoidable integration trouble, serving the built frontend from the FastAPI service is the fallback; retain a single public URL and verify the same user journey.
+Supabase/PostGIS becomes valuable for growing datasets, concurrent writes, saved reviews and durable shared queries. It is an extension point rather than a prerequisite for a small read-only corpus. Package or retrieve the permitted bundle and pinned text model from durable storage, then verify fingerprints at startup. They are ignored local assets today; pushing source code alone does not deploy them. Verify restart recovery before showing a public URL to judges.
 
-## 11. Eight-hour execution plan
+## 11. Remaining execution plan from current progress
 
-Assume three parallel roles: **data/vision**, **backend/spatial**, and **frontend/deployment**. With one developer, reduce the corpus and feature count further; do not keep the same promises.
+The original eight-hour plan was a target from an empty workspace. The implementation has advanced, but its early public-deployment milestone remains unmet. Continue from the working code; do not restart scaffolding or present the original schedule as achieved. These are planning timeboxes, not measured completion promises.
 
-| Time | Data/vision | Backend/spatial | Frontend/deployment | Exit gate |
-| --- | --- | --- | --- | --- |
-| 0:00–0:45 | Pass data gate; inspect target visibility | Define plan/evidence schemas; one real metric predicate | Scaffold map and deploy services | Real registered imagery and usable vectors selected |
-| 0:45–1:30 | Load models; check representative positives and hard negatives; build tiny bundle | Load evidence and retrieval; expose readiness and query API | Display genuine crop and geometry | One real end-to-end query works |
-| 1:30–2:00 | Generate initial embeddings/detections | Connect constrained parser and export | Test public frontend-to-backend flow | Public URL supports a real visual-spatial query |
-| 2:00–3:00 | Expand only the validated corpus/concepts | Implement associations, joins and unknown handling | Separate map layers and evidence cards | Correct object identity and spatial measurement |
-| 3:00–4:00 | Deduplicate edges; freeze data versions | Implement query patches and catalog/explore modes | Follow-ups, coverage display and exports | Core challenge workflow is complete |
-| 4:00–5:00 | Review development errors | Add sensitivity states if feasible | Explain ambiguous and unsupported requests | Evidence display handles difficult cases honestly |
-| 5:00–6:00 | Run held-out visual and relation cases | Record metrics, timings and failure paths | Fix usability and public integration issues | Measurements exist; thresholds frozen |
-| 6:00–7:00 | Inspect remaining errors without retuning on test set | Reliability fixes and restart checks | Full public-browser rehearsal | Fresh session can complete the demo |
-| 7:00–8:00 | Preserve evidence bundle and reports | Freeze release; no architecture changes | Record backup demo and rehearse judging | Working public URL plus clear limitations |
+| Order | Work | Initial timebox | Exit gate |
+| --- | --- | --- | --- |
+| 1 | Review representative roof/pool errors and independent registration landmarks; record what is and is not established | 30–45 min, then scope remaining evaluation | Visible failures documented; demonstration claims match evidence |
+| 2 | Package the existing same-origin app, immutable bundle and compatible text encoder; measure resources and deploy | 45–90 min, conditional on available hosting | Public search, evidence, follow-up, export and restart recovery work |
+| 3 | Add one Earth Search adapter and a separate Pune imagery-discovery view, with metadata and suitability reasons | 45–75 min; cut if public core is unstable | Actual bounded catalog response; coarse imagery cannot become rooftop detections |
+| 4 | Add connector regression cases and exercise successful, empty, unavailable and unsupported-task paths | 30–45 min | No lost filters, false empty results or incorrect imagery-to-object claims |
+| 5 | Complete the small held-out evaluation, record failures and public latency, then rehearse a fresh-browser demo | Reserve the remaining release window | Evidence report and reproducible demonstration; any unmet gate stated plainly |
+| Optional | Investigate OAM coverage; add CDSE only after the first connector passes | OAM investigation capped at 20 min; other work only with spare time | Actual usable asset or explicit unavailable/unknown outcome |
+
+The first provider feature is metadata discovery, not automatic municipality-scale download, model inference or multi-provider orchestration. Its value is helping the user select data without confusing availability with suitability. It must not delay public delivery of the core challenge workflow.
 
 ### Cut rules
 
-- At 45 minutes: change the geography if imagery is unavailable; do not keep waiting for Pune data.
-- At 90 minutes: stop exploring additional model families. Use the functioning validated choice and shrink scope.
-- At Hour 2: if grounding is still absent, the central requirement is at risk. Stop polishing and address it; an OSM-only response is not a substitute.
-- At Hour 4: stop adding capabilities. Retain retrieval, real grounding, spatial joins, evidence, follow-ups and GeoJSON.
-- At Hour 6: freeze features and use the remaining time for correctness and deployed verification.
+- Keep the current model pair and geography until evidence justifies a change; do not spend the remaining window on model shopping.
+- If no suitable Pune asset is established, show Pune imagery discovery separately and retain Sacramento for grounded infrastructure search.
+- If a provider fails, report unavailable or use a clearly dated cached response; never substitute invented items or claim an empty catalog.
+- Cut the second connector, cloud processing, live grounding and database migration before cutting evidence, export or public verification.
+- Reserve the final release window for evaluation and rehearsal. A failed gate remains outstanding; elapsed time does not make it pass.
 
 ## 12. Evaluation and acceptance criteria
 
@@ -475,6 +565,19 @@ Do not compare a tile-retrieval ranking metric directly with an object-detection
 - A follow-up changing only distance, with all other filters preserved.
 - Top-k truncation and pagination that could otherwise be mistaken for “all.”
 
+### Additional acceptance cases for imagery discovery, when implemented
+
+- A known provider response, a genuine empty result, timeout, throttling and expired asset access produce distinct outcomes.
+- Area and acquisition-date filters are respected across pages; relative-date follow-ups preserve all unchanged filters.
+- Missing resolution/date/cloud/licence metadata stays unknown. A low scene-wide cloud value does not certify clear AOI pixels.
+- A coarse Sentinel product is discoverable while an individual-panel request is ineligible for that source.
+- Native band resolution survives display resampling; a resized preview cannot make an asset eligible.
+- Duplicate acquisitions indexed by two providers remain linked to one source observation.
+- Provider/item IDs resolve only through configured adapters; signed credentials do not appear in logs, browser metadata or exports.
+- Selecting/preparing a new asset creates a new bundle version; earlier evidence and export plans retain their original identity.
+
+Record connector tests separately from the existing 54-test implementation run. No discovery acceptance case is claimed as passed by this documentation update.
+
 ### Definition of done
 
 - A fresh browser session can open the public URL and complete search, refinement, inspection and export.
@@ -490,7 +593,7 @@ Warm p95 under five seconds for the small cached corpus is a useful engineering 
 
 ## 13. Judge-facing demonstration
 
-Select examples only after the data and visual checks pass. Candidate families include buildings close to roads, visible roof features near mapped waterways, and larger rooftop solar arrays near a supported reference layer. “Commercial” and “open drainage” enter the demo only when their evidence exists.
+The current real-model examples are building roofs and swimming pools within a specified distance of roads. Review source crops and association failures before choosing demonstration instances. Solar arrays, commercial use and open drainage enter the demo only after their separate evidence gates pass.
 
 1. Show the municipality, imagery date, covered area and supported concepts.
 2. Enter a natural-language visual-spatial request.
@@ -499,14 +602,18 @@ Select examples only after the data and visual checks pass. Candidate families i
 5. Inspect an uncertain case or unsupported request to demonstrate the evidence boundary.
 6. Download GeoJSON and open it as a separate map layer to verify the export.
 
+After the discovery extension is implemented and checked, an optional second scenario is “Find available satellite imagery of Pune from the last six months.” Show the executed dates, returned scene metadata and why a candidate is or is not suitable for a particular analysis. Return to the prepared Sacramento bundle for the grounded-object example unless Pune data has separately passed preparation and evaluation. Do not rehearse this proposed connector as an already delivered feature.
+
 Suggested positioning:
 
-> GeoVerify-X turns a question into an inspectable geographic search. It uses an open vision-language model to find visual candidates, connects them to mapped objects, and checks spatial conditions with deterministic geometry. Each result includes the source image, the evidence for each condition and the limits of what the data can establish.
+> TerraLens turns a question into an inspectable geographic search. It uses an open vision-language model to find visual candidates, connects them to mapped objects, and checks spatial conditions with deterministic geometry. Each result includes the source image, the evidence for each condition and the limits of what the data can establish.
 
 Do not claim first-of-its-kind research, municipality-wide completeness, real-time imagery, unrestricted live grounding or government readiness. The strongest delivery is a coherent, tested visual-to-spatial workflow whose answers can be checked.
 
 ## 14. After the hackathon
 
 The next priorities are broader geographic evaluation, a live grounding worker, richer masks where exact object boundaries matter, better image/map registration and independently validated attribute sources. Add durable reviewer feedback and PostGIS when usage requires them.
+
+For the proposed Pune vegetation-change extension, use a separate pipeline: suitable multi-date surface-reflectance products -> cloud/shadow/nodata masking -> seasonally comparable observations and co-registration -> spectral change candidates -> patch geometry and area -> OSM spatial joins -> review and export. A vegetation-index decrease alone does not prove forest clearing, its cause or legal status. Check acquisition dates, product scaling and valid-pixel coverage, and evaluate against independently reviewed changes before making change claims. Earth Engine or CDSE processing may help later, but neither is needed for the first metadata adapter.
 
 Only after retrieval and relationship reliability are measured should the project expand into temporal change alerts, maintenance prioritization or repair optimization. Those applications need additional data and objectives; they do not follow automatically from a spatial match.
