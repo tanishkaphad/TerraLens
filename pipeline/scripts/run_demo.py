@@ -14,7 +14,12 @@ from pathlib import Path
 
 
 PIPELINE_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_BUNDLE = PIPELINE_DIR / "data" / "demo"
+REFERENCE_BUNDLE = PIPELINE_DIR / "data" / "spacenet-grounded"
+if not (REFERENCE_BUNDLE / "manifest.json").is_file():
+    REFERENCE_BUNDLE = PIPELINE_DIR / "data" / "spacenet-urban"
+if not (REFERENCE_BUNDLE / "manifest.json").is_file():
+    REFERENCE_BUNDLE = PIPELINE_DIR / "data" / "spacenet-sample"
+DEFAULT_BUNDLE = REFERENCE_BUNDLE if (REFERENCE_BUNDLE / "manifest.json").is_file() else PIPELINE_DIR / "data" / "demo"
 DEFAULT_CHECKPOINT = PIPELINE_DIR / "data" / "models" / "SkyCLIP_ViT_B32_top50pct.safetensors"
 
 

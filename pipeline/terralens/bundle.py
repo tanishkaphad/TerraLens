@@ -5,6 +5,7 @@ import json
 import math
 import os
 from pathlib import Path
+import threading
 from typing import Any
 import geopandas as gpd
 import numpy as np
@@ -41,6 +42,7 @@ class Bundle:
         self.root = root.resolve()
         self._text_model = self._tokenizer = None
         self._encoder_attempted = False
+        self._encoder_lock = threading.RLock()
         self.text_model_error: str | None = None
         try:
             self.manifest = json.loads((self.root / "manifest.json").read_text())
@@ -176,65 +178,67 @@ class Bundle:
 
     def text_encoder(self):
         """Load only a local checkpoint with the image index's exact identity."""
-        if self._text_model is not None:
+        with self._encoder_lock:
+            if self._text_model is not None:
+                return self._text_model, self._tokenizer
+            if self._encoder_attempted:
+                return None
+            self._encoder_attempted = True
+            checkpoint = os.getenv("ENCODER_CHECKPOINT")
+            if not checkpoint:
+                self.text_model_error = "checkpoint_not_configured"
+                return None
+            path = Path(checkpoint).expanduser().resolve()
+            if not path.is_file():
+                self.text_model_error = "checkpoint_not_found"
+                return None
+            expected = self.manifest.get("image_encoder", {}).get("checkpoint_sha256")
+            if not expected or file_sha256(path) != expected:
+                self.text_model_error = "checkpoint_identity_missing_or_mismatched"
+                return None
+            try:
+                import open_clip
+                import torch
+                name = self.manifest.get("image_encoder", {}).get("model_name", "ViT-B-32")
+                model = open_clip.create_model(name, pretrained=None)
+                open_clip.load_checkpoint(model, str(path))
+                if torch.cuda.is_available():
+                    device = torch.device("cuda")
+                elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                    device = torch.device("mps")
+                else:
+                    device = torch.device("cpu")
+                self._text_model = model.eval().to(device)
+                self._tokenizer = open_clip.get_tokenizer(name)
+                self._device = device
+                probe = self.encode_text("aerial imagery")
+                if probe is None or probe.shape != (self.embeddings.shape[1],):
+                    raise ValueError("text/image embedding dimensions differ")
+                self.text_model_error = None
+            except Exception as exc:
+                self._text_model = self._tokenizer = None
+                self.text_model_error = f"encoder_load_failed: {type(exc).__name__}"
+                return None
             return self._text_model, self._tokenizer
-        if self._encoder_attempted:
-            return None
-        self._encoder_attempted = True
-        checkpoint = os.getenv("ENCODER_CHECKPOINT")
-        if not checkpoint:
-            self.text_model_error = "checkpoint_not_configured"
-            return None
-        path = Path(checkpoint).expanduser().resolve()
-        if not path.is_file():
-            self.text_model_error = "checkpoint_not_found"
-            return None
-        expected = self.manifest.get("image_encoder", {}).get("checkpoint_sha256")
-        if not expected or file_sha256(path) != expected:
-            self.text_model_error = "checkpoint_identity_missing_or_mismatched"
-            return None
-        try:
-            import open_clip
-            import torch
-            name = self.manifest.get("image_encoder", {}).get("model_name", "ViT-B-32")
-            model = open_clip.create_model(name, pretrained=None)
-            open_clip.load_checkpoint(model, str(path))
-            if torch.cuda.is_available():
-                device = torch.device("cuda")
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                device = torch.device("mps")
-            else:
-                device = torch.device("cpu")
-            self._text_model = model.eval().to(device)
-            self._tokenizer = open_clip.get_tokenizer(name)
-            self._device = device
-            probe = self.encode_text("aerial imagery")
-            if probe is None or probe.shape != (self.embeddings.shape[1],):
-                raise ValueError("text/image embedding dimensions differ")
-            self.text_model_error = None
-        except Exception as exc:
-            self._text_model = self._tokenizer = None
-            self.text_model_error = f"encoder_load_failed: {type(exc).__name__}"
-            return None
-        return self._text_model, self._tokenizer
 
     def encode_text(self, text: str) -> np.ndarray | None:
-        loaded = self.text_encoder()
-        if loaded is None:
-            return None
-        try:
-            import torch
-            model, tokenizer = loaded
-            with torch.no_grad():
-                vector = model.encode_text(tokenizer([text]).to(self._device))
-                vector = vector / vector.norm(dim=-1, keepdim=True).clamp(min=1e-12)
-            result = vector[0].float().cpu().numpy()
-            if result.shape != (self.embeddings.shape[1],) or not np.isfinite(result).all() or np.linalg.norm(result) < 0.99:
-                raise ValueError("invalid text embedding")
-            return result
-        except Exception as exc:
-            self.text_model_error = f"encoder_inference_failed: {type(exc).__name__}"
-            return None
+        with self._encoder_lock:
+            loaded = self.text_encoder()
+            if loaded is None:
+                return None
+            try:
+                import torch
+                model, tokenizer = loaded
+                with torch.no_grad():
+                    vector = model.encode_text(tokenizer([text]).to(self._device))
+                    vector = vector / vector.norm(dim=-1, keepdim=True).clamp(min=1e-12)
+                result = vector[0].float().cpu().numpy()
+                if result.shape != (self.embeddings.shape[1],) or not np.isfinite(result).all() or np.linalg.norm(result) < 0.99:
+                    raise ValueError("invalid text embedding")
+                return result
+            except Exception as exc:
+                self.text_model_error = f"encoder_inference_failed: {type(exc).__name__}"
+                return None
 
     def retrieval_status(self) -> dict[str, Any]:
         loaded = self.text_encoder()

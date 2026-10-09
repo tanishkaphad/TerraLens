@@ -2,11 +2,13 @@
 from __future__ import annotations
 from time import perf_counter
 import math
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import quote
 import geopandas as gpd
 from pyproj import CRS
 from shapely.geometry import mapping, shape
+from shapely.ops import unary_union
 from .bundle import Bundle, json_value
 from .planner import QueryPlan, validate_plan
 
@@ -69,6 +71,137 @@ def _analysis_crs(bundle: Bundle) -> CRS:
         raise ValueError("Could not choose a local metric CRS for spatial checks.")
     return CRS.from_user_input(crs)
 
+def _relations(plan: QueryPlan) -> list[Any]:
+    """The legacy relation remains first; new relations are independent AND clauses."""
+    result = []
+    if plan.reference_layer and plan.predicate:
+        result.append(SimpleNamespace(reference_layer=plan.reference_layer, predicate=plan.predicate,
+            distance_m=plan.distance_m, attributes=[item for item in plan.attributes if item.role == "reference"]))
+    result.extend(getattr(plan, "relations", []))
+    return result
+
+def _spatial_evidence(bundle: Bundle, subject_metric, relations: list[Any], metric_layers: dict,
+        *, association_state: str, associated_layer: str | None, geometry_role: str,
+        allowance: float | None, context: dict, subject_feature_id: str | None = None) -> list[dict]:
+    """Evaluate each relation against its own reference features and attribute witnesses."""
+    conditions = []
+    margin = float(allowance or 0)
+    for relation_index, relation in enumerate(relations):
+        layer_id = relation.reference_layer
+        reference, reference_metric = bundle.layers[layer_id], metric_layers[layer_id]
+        metadata = bundle.manifest.get("vector_layers", {}).get(layer_id, {})
+        source_metadata = metadata.get("metadata", {})
+        coverage_status = metadata.get("coverage_status", source_metadata.get("coverage_status"))
+        reference_complete = metadata.get("reference_coverage_complete", source_metadata.get("reference_coverage_complete"))
+        partial_coverage = reference_complete is False or coverage_status is not None and "partial" in str(coverage_status).lower()
+        search_geometry = subject_metric.buffer(float(relation.distance_m) + margin) if relation.predicate == "within_distance" else subject_metric
+        positions = reference_metric.sindex.query(search_geometry, predicate="intersects")
+        references = []
+        for position in positions:
+            position = int(position)
+            row, metric_row = reference.iloc[position], reference_metric.iloc[position]
+            reference_id = _feature_id(row, position)
+            if layer_id == associated_layer and association_state == "unique" and reference_id == subject_feature_id:
+                continue
+            distance = float(subject_metric.distance(metric_row.geometry))
+            if relation.predicate == "within_distance":
+                if distance > float(relation.distance_m) + margin:
+                    continue
+                spatial_status = "unknown" if allowance is not None and distance + margin > float(relation.distance_m) else "pass"
+            else:
+                if not subject_metric.intersects(metric_row.geometry):
+                    continue
+                spatial_status = "pass"
+                if association_state != "unique" and geometry_role not in {"object_mask", "segmented_object_boundary"}:
+                    spatial_status = "unknown"
+            reference_props = _properties(row, reference.geometry.name)
+            checks = _attribute_evidence(reference_props, relation.attributes)
+            references.append({"id": reference_id, "position": position,
+                "distance_m": distance, "status": condition_state(checks + [{"status": spatial_status}]),
+                "spatial_status": spatial_status, "attributes": checks, "properties": reference_props})
+        references.sort(key=lambda item: (item["distance_m"], item["id"]))
+        qualified = [item for item in references if item["status"] == "pass"]
+        pending = [item for item in references if item["status"] == "unknown"]
+        witness_pool = qualified or pending or references
+        witness = witness_pool[0] if witness_pool else None
+        relation_status = "pass" if qualified else "unknown" if pending or reference.empty or partial_coverage else "fail"
+        if associated_layer and association_state != "unique":
+            relation_status = "unknown"
+        condition = {"condition": relation.predicate, "relation_index": relation_index, "status": relation_status,
+            "reference_layer": layer_id, "radius_m": relation.distance_m,
+            "distance_m": round(witness["distance_m"], 3) if witness else None,
+            "distance_basis": "associated_vector_footprint" if association_state == "unique" else "visual_detection_envelope",
+            "distance_uncertainty_m": allowance, "uncertainty_status": "assumed_allowance" if allowance is not None else "not_estimated",
+            "reference_feature_ids": [item["id"] for item in (qualified or pending)],
+            "reference_candidates": [{key: value for key, value in item.items() if key != "position"} for item in references],
+            "reference_coverage_status": coverage_status,
+            "note": "No mapped reference features are available; absence is not established." if reference.empty else
+                "Reference coverage is partial; a nonmatch does not establish absence." if partial_coverage else
+                "Spatial predicates apply to the supplied geometry and frozen vector layer."}
+        conditions.append(condition)
+        if witness and witness["status"] != "fail" and (association_state == "unique" or not associated_layer or qualified or pending):
+            conditions.extend({**check, "relation_index": relation_index, "reference_layer": layer_id,
+                "reference_feature_id": witness["id"]} for check in witness["attributes"])
+        # Preserve every qualifying reference, including witnesses for separate clauses.
+        for item in qualified + pending:
+            row = reference.iloc[item["position"]]
+            key = f"{layer_id}:{item['id']}"
+            context[key] = {"type": "Feature", "id": key, "geometry": mapping(row.geometry), "properties": {
+                "id": item["id"], "layer": layer_id, "role": "reference", "source_attributes": item["properties"],
+                "vector_extraction_date": metadata.get("extraction_date"),
+                "source": metadata.get("source") or metadata.get("source_url"), "attribution": metadata.get("attribution")}}
+    return conditions
+
+def _execute_vectors(bundle: Bundle, plan: QueryPlan, base: dict, analysis_crs: CRS, metric_layers: dict,
+        allowance: float | None, start: int, end: int | None, all_results: bool, started: float) -> dict:
+    """Search supplied vector subjects without image encoding or visual evidence claims."""
+    layer_id = plan.subject_layer
+    subjects, subjects_metric = bundle.layers[layer_id], metric_layers[layer_id]
+    coverage = unary_union([shape(tile["geometry"]) for tile in bundle.tiles])
+    positions = sorted(int(value) for value in subjects.sindex.query(coverage, predicate="intersects"))
+    subject_conditions = [item for item in plan.attributes if item.role == "subject"]
+    relations = _relations(plan)
+    records, uncertain, excluded, context_by_id = [], [], 0, {}
+    metadata = bundle.manifest.get("vector_layers", {}).get(layer_id, {})
+    for position in positions:
+        row, metric_row = subjects.iloc[position], subjects_metric.iloc[position]
+        properties = _properties(row, subjects.geometry.name)
+        subject_id = _feature_id(row, position)
+        local_context = {}
+        conditions = [{"condition": "vector_source", "status": "pass", "subject_layer": layer_id,
+            "feature_id": subject_id, "source": metadata.get("source") or metadata.get("source_url"),
+            "vector_extraction_date": metadata.get("extraction_date")}]
+        conditions.extend(_attribute_evidence(properties, subject_conditions))
+        conditions.extend(_spatial_evidence(bundle, metric_row.geometry, relations, metric_layers,
+            association_state="unique", associated_layer=layer_id, geometry_role="vector_feature",
+            allowance=allowance, context=local_context, subject_feature_id=subject_id))
+        state = condition_state(conditions)
+        if state == "fail":
+            excluded += 1
+            continue
+        context_by_id.update(local_context)
+        covered_tiles = [tile for tile in bundle.tiles if row.geometry.intersects(shape(tile["geometry"]))]
+        feature = {"type": "Feature", "id": f"{layer_id}:{subject_id}", "geometry": mapping(row.geometry), "properties": {
+            "id": subject_id, "subject_layer": layer_id, "role": "match" if state == "pass" else "uncertain_candidate",
+            "geometry_role": "source_vector_feature", "evidence_status": "supported_by_available_evidence" if state == "pass" else "unknown",
+            "source_attributes": properties, "subject_attributes": properties, "vector_extraction_date": metadata.get("extraction_date"),
+            "source": metadata.get("source") or metadata.get("source_url"), "attribution": metadata.get("attribution"),
+            "imagery_coverage_tile_ids": [tile["tile_id"] for tile in covered_tiles],
+            "imagery_coverage_dates": sorted({tile["acquisition_date"] for tile in covered_tiles if tile.get("acquisition_date")}),
+            "conditions": conditions, "observations": [], "evidence_geometries": [],
+            "reason": "; ".join(item["condition"] + " is unresolved" for item in conditions if item["status"] == "unknown") if state != "pass" else None}}
+        (records if state == "pass" else uncertain).append(feature)
+    records.sort(key=lambda feature: feature["id"])
+    uncertain.sort(key=lambda feature: feature["id"])
+    base.update({"result_kind": "vector_features", "analysis_crs": analysis_crs.to_string(),
+        "objects_evaluated": len(positions), "objects_excluded": excluded, "duplicate_observations_collapsed": 0,
+        "total_matches": len(records), "total_uncertain": len(uncertain), "features": records[start:end],
+        "uncertain_candidates": uncertain[start:end], "tile_candidates": [], "context_features": list(context_by_id.values()),
+        "truncated": not all_results and end < len(records), "uncertain_truncated": not all_results and end < len(uncertain),
+        "claim_scope": "Supplied vector features intersecting imagery coverage, filtered by source attributes and metric relationships. No visual model inference or real-world completeness claim."})
+    base["timings_ms"].update({"spatial_and_evidence": round((perf_counter() - started) * 1000, 2), "total": round((perf_counter() - started) * 1000, 2)})
+    return json_value(base)
+
 def _merge_observations(features: list[dict]) -> tuple[list[dict], int]:
     """Merge identified vector objects and strongly overlapping unassociated envelopes."""
     groups: list[dict] = []
@@ -84,7 +217,14 @@ def _merge_observations(features: list[dict]) -> tuple[list[dict], int]:
                 if (props.get("association_layer"), props["id"]) == (old.get("association_layer"), old["id"]):
                     found = index
                     break
-            elif props.get("association") == old.get("association") == "not_required" and props.get("source_sha256") == old.get("source_sha256"):
+            elif props.get("association") == old.get("association") == "not_required":
+                source_hash = props.get("source_sha256")
+                same_source = bool(source_hash) and source_hash == old.get("source_sha256")
+                date, old_date = props.get("imagery_date"), old.get("imagery_date")
+                same_epoch = (bool(date) and date == old_date) or (
+                    not date and not old_date and bool(props.get("tile_id")) and props.get("tile_id") == old.get("tile_id"))
+                if not same_source or not same_epoch:
+                    continue
                 other = geometries[index]
                 union = geometry.union(other).area
                 if union > 0 and geometry.intersection(other).area / union >= 0.65:
@@ -110,7 +250,7 @@ def execute(bundle: Bundle, plan: QueryPlan, mode: str = "catalog_scan", page_si
     plan = validate_plan(plan, bundle.manifest, mode)
     if not 1 <= page_size <= 100 or not 0 <= page <= 1000:
         raise ValueError("Pagination must use page_size 1–100 and page 0–1000.")
-    text_vector = bundle.encode_text(plan.visual_query)
+    text_vector = None if plan.query_type == "vectors" else bundle.encode_text(plan.visual_query)
     if mode == "explore" and text_vector is None:
         raise ValueError("Exploration needs a verified, compatible local text encoder; cached catalog scanning remains available.")
     scores = {} if text_vector is None else {tile["tile_id"]: float(value) for tile, value in zip(bundle.tiles, bundle.embeddings @ text_vector)}
@@ -122,7 +262,7 @@ def execute(bundle: Bundle, plan: QueryPlan, mode: str = "catalog_scan", page_si
     base = {"plan": plan.model_dump(), "dataset_version": bundle.manifest.get("dataset_version"), "mode": mode,
         "tiles_considered": len(bundle.tiles), "tiles_processed": len(allowed), "tiles_available": len(bundle.tiles),
         "page": page, "page_size": page_size, "text_similarity_enabled": text_vector is not None,
-        "text_encoder_status": "ready" if text_vector is not None else bundle.text_model_error or "checkpoint_not_configured",
+        "text_encoder_status": "not_required_for_vector_query" if plan.query_type == "vectors" else "ready" if text_vector is not None else bundle.text_model_error or "checkpoint_not_configured",
         "coverage": bundle.manifest.get("coverage", {}), "provenance": bundle.provenance(),
         "timings_ms": {"retrieval": retrieval_ms}, "candidate_selection_truncated": len(selected) < len(bundle.tiles)}
     start, end = (0, None) if all_results else (page * page_size, (page + 1) * page_size)
@@ -132,25 +272,31 @@ def execute(bundle: Bundle, plan: QueryPlan, mode: str = "catalog_scan", page_si
             "uncertain_candidates": [], "context_features": [], "objects_evaluated": 0, "total_matches": 0,
             "total_tile_candidates": len(candidates), "total_uncertain": 0,
             "truncated": not all_results and (page + 1) * page_size < len(candidates),
-            "unresolved_conditions": ([{"condition": plan.predicate, "reference_layer": plan.reference_layer,
-                "distance_m": plan.distance_m, "status": "unknown", "reason": "Tile similarity does not localize an object or establish its spatial relationship."}] if plan.predicate else []),
+            "unresolved_conditions": [{"condition": relation.predicate, "reference_layer": relation.reference_layer,
+                "distance_m": relation.distance_m, "status": "unknown", "reason": "Tile similarity does not localize an object or establish its spatial relationship."} for relation in _relations(plan)],
             "claim_scope": "Ranked image tiles only. Similarity is not a probability; object identity and spatial relationships require grounding."})
         base["timings_ms"]["total"] = round((perf_counter() - started) * 1000, 2)
         return json_value(base)
 
-    concept = bundle.manifest["supported_concepts"][plan.concept_id]
-    associated_layer = concept.get("association_layer")
     analysis_crs = _analysis_crs(bundle)
-    reference = bundle.layers[plan.reference_layer]
-    reference_metric = reference.to_crs(analysis_crs)
+    relations = _relations(plan)
+    concept = bundle.manifest.get("supported_concepts", {}).get(plan.concept_id, {
+        "prompt": plan.visual_query, "association_layer": getattr(plan, "subject_layer", None)})
+    associated_layer = concept.get("association_layer")
+    required_layers = {relation.reference_layer for relation in relations}
+    if plan.query_type == "vectors":
+        required_layers.add(plan.subject_layer)
+    elif associated_layer:
+        required_layers.add(associated_layer)
+    metric_layers = {layer_id: bundle.layers[layer_id].to_crs(analysis_crs) for layer_id in required_layers}
     subjects = bundle.layers.get(associated_layer)
-    subjects_metric = None if subjects is None else subjects.to_crs(analysis_crs)
-    reference_conditions = [condition for condition in plan.attributes if condition.role == "reference"]
+    subjects_metric = metric_layers.get(associated_layer)
     subject_conditions = [condition for condition in plan.attributes if condition.role == "subject"]
     allowance = bundle.manifest.get("distance_uncertainty_m")
     if allowance is not None and (not isinstance(allowance, (int, float)) or not math.isfinite(allowance) or not 0 <= allowance <= 1000):
         raise ValueError("Distance uncertainty allowance must be a finite value in metres from 0 to 1000.")
-    margin = float(allowance or 0)
+    if plan.query_type == "vectors":
+        return _execute_vectors(bundle, plan, base, analysis_crs, metric_layers, allowance, start, end, all_results, started)
     detections = [feature for feature in bundle.detections if feature["properties"].get("concept_id") == plan.concept_id
         and any(identifier in allowed for identifier in [feature["properties"].get("tile_id"), *[observation.get("tile_id") for observation in feature["properties"].get("observations", [])]])]
     records, uncertain, excluded = [], [], 0
@@ -179,7 +325,7 @@ def execute(bundle: Bundle, plan: QueryPlan, mode: str = "catalog_scan", page_si
                 association_state = "ambiguous" if candidates else "unmatched"
         conditions = [{"condition": "visual_detection", "status": "pass", "concept_id": plan.concept_id,
             "score": props.get("score"), "score_meaning": "uncalibrated_model_score", "checkpoint": props.get("model_id"),
-            "model_revision": props.get("model_revision"), "screening_policy": "preparation_threshold",
+            "model_revision": props.get("model_revision"), "screening_policy": "live_grounding_threshold" if mode == "ground" else "preparation_threshold",
             "screening_threshold": concept.get("detector_threshold", bundle.manifest.get("object_detector", {}).get("score_threshold"))}]
         if associated_layer:
             conditions.append({"condition": "feature_association", "status": "pass" if association_state == "unique" else "unknown",
@@ -187,56 +333,16 @@ def execute(bundle: Bundle, plan: QueryPlan, mode: str = "catalog_scan", page_si
                 "candidate_feature_ids": [_feature_id(subjects.iloc[position], position) for position in candidates], "association": association_state})
         conditions += _attribute_evidence(subject_properties, subject_conditions)
         subject_metric = gpd.GeoSeries([subject_geometry], crs="EPSG:4326").to_crs(analysis_crs).iloc[0]
-        # Unknown association cannot become a passing footprint relationship. Preserve its visual envelope.
-        search_geometry = subject_metric.buffer(float(plan.distance_m) + margin) if plan.predicate == "within_distance" else subject_metric
-        positions = reference_metric.sindex.query(search_geometry, predicate="intersects")
-        references = []
-        for position in positions:
-            position = int(position)
-            row, metric_row = reference.iloc[position], reference_metric.iloc[position]
-            distance = float(subject_metric.distance(metric_row.geometry))
-            if plan.predicate == "within_distance":
-                if distance > float(plan.distance_m) + margin:
-                    continue
-                spatial_status = "unknown" if allowance is not None and distance + margin > float(plan.distance_m) else "pass"
-            else:
-                if not subject_metric.intersects(metric_row.geometry):
-                    continue
-                spatial_status = "pass"
-                if association_state != "unique" and props.get("geometry_role", "visual_detection_envelope") not in {"object_mask", "segmented_object_boundary"}:
-                    spatial_status = "unknown"
-            reference_props = _properties(row, reference.geometry.name)
-            checks = _attribute_evidence(reference_props, reference_conditions)
-            state = condition_state(checks + [{"status": spatial_status}])
-            rid = _feature_id(row, position)
-            references.append({"id": rid, "position": position, "distance_m": distance, "status": state,
-                "spatial_status": spatial_status, "attributes": checks, "properties": reference_props})
-        qualified = [item for item in references if item["status"] == "pass"]
-        pending = [item for item in references if item["status"] == "unknown"]
-        witness_pool = qualified or pending or references
-        witness = min(witness_pool, key=lambda item: item["distance_m"]) if witness_pool else None
-        relation_status = "pass" if qualified else "unknown" if pending else "fail"
-        if associated_layer and association_state != "unique":
-            relation_status = "unknown"
-        conditions.append({"condition": plan.predicate, "status": relation_status, "reference_layer": plan.reference_layer,
-            "radius_m": plan.distance_m, "distance_m": round(witness["distance_m"], 3) if witness else None,
-            "distance_basis": "associated_vector_footprint" if association_state == "unique" else "visual_detection_envelope",
-            "distance_uncertainty_m": allowance, "uncertainty_status": "assumed_allowance" if allowance is not None else "not_estimated",
-            "reference_feature_ids": [item["id"] for item in (qualified or pending)],
-            "reference_candidates": [{key: value for key, value in item.items() if key != "position"} for item in references],
-            "note": "Spatial predicates apply to the supplied geometry and frozen vector layer."})
-        if witness and (association_state == "unique" or not associated_layer or qualified or pending):
-            conditions += witness["attributes"]
+        local_context = {}
+        conditions.extend(_spatial_evidence(bundle, subject_metric, relations, metric_layers,
+            association_state=association_state, associated_layer=associated_layer,
+            geometry_role=props.get("geometry_role", "visual_detection_envelope"), allowance=allowance,
+            context=local_context, subject_feature_id=subject_id))
         state = condition_state(conditions)
         if state == "fail":
             excluded += 1
             continue
-        for item in (qualified or pending):
-            row = reference.iloc[item["position"]]
-            key = f"{plan.reference_layer}:{item['id']}"
-            context_by_id[key] = {"type": "Feature", "id": key, "geometry": mapping(row.geometry),
-                "properties": {"id": item["id"], "layer": plan.reference_layer, "role": "reference", "source_attributes": item["properties"],
-                    "vector_extraction_date": bundle.manifest["vector_layers"][plan.reference_layer].get("extraction_date")}}
+        context_by_id.update(local_context)
         observations, evidence_geometries = [], []
         for raw in props.get("observations") or [props]:
             observation_tile_id = raw.get("tile_id", props["tile_id"])
@@ -283,6 +389,7 @@ def execute(bundle: Bundle, plan: QueryPlan, mode: str = "catalog_scan", page_si
         "features": records[start:end], "uncertain_candidates": uncertain[start:end], "tile_candidates": [],
         "context_features": list(context_by_id.values()), "truncated": not all_results and (page + 1) * page_size < len(records),
         "uncertain_truncated": not all_results and (page + 1) * page_size < len(uncertain),
-        "claim_scope": "Matches within the cached model detections and supplied vector features; no guarantee of real-world completeness or calibrated correctness."})
+        "claim_scope": ("Matches within the live grounded observations and supplied vector features; no guarantee of real-world completeness or calibrated correctness."
+            if mode == "ground" else "Matches within the cached model detections and supplied vector features; no guarantee of real-world completeness or calibrated correctness.")})
     base["timings_ms"].update({"spatial_and_evidence": round((perf_counter() - started) * 1000 - retrieval_ms, 2), "total": round((perf_counter() - started) * 1000, 2)})
     return json_value(base)

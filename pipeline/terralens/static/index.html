@@ -11,31 +11,47 @@
   <script defer src="/static/app.js"></script>
 </head>
 <body>
-  <header class="topbar"><a class="brand" href="/">Terra<span>Lens</span></a><span class="tagline">Visual evidence. Geographic answers.</span><div id="area" class="area">Loading study area</div></header>
+  <header class="topbar"><a class="brand" href="/">Terra<span>Lens</span></a><span class="tagline">Visual evidence. Geographic answers.</span><div id="datasetControl" class="dataset-control"><label for="datasetSelect">Dataset</label><select id="datasetSelect" aria-label="Evidence dataset"><option>Loading datasets</option></select></div><div id="area" class="area">Loading study area</div></header>
   <main class="workspace">
     <aside class="sidebar">
       <section class="search-panel">
         <div class="eyebrow">Multimodal geographic search</div>
         <h1>Find it in<br>the landscape.</h1>
-        <p class="intro">Describe what you want to find and how it relates to the surrounding area.</p>
+        <p class="intro">Search prepared evidence, discover relevant imagery, or run a bounded object detector.</p>
         <form id="searchForm">
-          <fieldset class="modes"><legend class="sr-only">Search mode</legend><label><input type="radio" name="mode" value="catalog_scan" checked><span>Spatial search</span></label><label><input type="radio" name="mode" value="explore"><span>Image search</span></label></fieldset>
-          <p id="modeHelp" class="hint">Check all prepared object detections against mapped features.</p>
-          <label class="sr-only" for="query">Your geographic question</label>
-          <textarea id="query" rows="3" minlength="3" maxlength="500" placeholder="Find swimming pools within 100 metres of roads" required></textarea>
-          <button id="searchButton" class="primary" type="submit">Search study area <span aria-hidden="true">→</span></button>
+          <fieldset class="modes" aria-describedby="modeHelp modeAvailability">
+            <legend class="sr-only">Search mode</legend>
+            <label><input type="radio" name="mode" value="catalog_scan" checked><span>Prepared evidence</span></label>
+            <label id="exploreMode"><input type="radio" name="mode" value="explore"><span>Image discovery</span></label>
+            <label id="groundMode"><input type="radio" name="mode" value="ground"><span>Detect objects</span></label>
+          </fieldset>
+          <p id="modeHelp" class="hint">Search cached detections and supplied map records with spatial conditions.</p>
+          <p id="modeAvailability" class="availability" role="status" aria-live="polite" hidden></p>
+          <label id="queryLabel" class="field-label" for="query">Geographic question</label>
+          <textarea id="query" rows="3" minlength="3" maxlength="500" placeholder="Find swimming pools within 100 metres of roads" aria-describedby="modeHelp" required></textarea>
+          <div id="groundControls" class="ground-controls" hidden>
+            <label for="groundingTileLimit">Analyze top-ranked image tiles</label>
+            <select id="groundingTileLimit" aria-describedby="groundLimitHelp"><option value="1">1 tile</option><option value="2" selected>2 tiles</option><option value="3">3 tiles</option><option value="4">4 tiles</option></select>
+            <p id="groundLimitHelp">A smaller run is faster. Detection covers only these ranked tiles.</p>
+          </div>
+          <button id="searchButton" class="primary" type="submit"><span id="searchButtonLabel">Search prepared evidence</span><span class="arrow" aria-hidden="true">→</span></button>
         </form>
-        <div id="examples" class="examples"></div>
+        <div class="example-section"><span id="examplesLabel" class="examples-label">Try a prepared-evidence query</span><div id="examples" class="examples" aria-labelledby="examplesLabel"></div></div>
         <div id="status" class="status" role="status" aria-live="polite">Connecting to the evidence bundle…</div>
         <div id="followup" class="followup" hidden><span>Follow-up context is active</span><button id="reset" type="button">Start fresh</button></div>
-        <details id="planPanel" hidden><summary>How your question was interpreted</summary><pre id="plan"></pre></details>
+        <section id="planPanel" class="plan-panel" aria-labelledby="planHeading" hidden>
+          <h2 id="planHeading">How TerraLens interpreted this</h2>
+          <dl id="planSummary" class="plan-summary"></dl>
+          <details><summary>View exact plan data</summary><pre id="plan"></pre></details>
+        </section>
       </section>
       <section class="results-panel">
         <div class="section-heading"><div><span class="eyebrow">Search results</span><h2 id="resultsTitle">Your evidence appears here</h2></div><button id="download" class="secondary" hidden>Export GeoJSON</button></div>
         <p id="scope" class="scope"></p>
+        <p id="executionMeta" class="execution-meta" hidden></p>
         <label id="exportOptions" class="export-options" hidden><input id="includeReview" type="checkbox"> Include candidates needing review in export</label>
-        <div id="results"><div class="empty"><div class="empty-shape" aria-hidden="true"></div><strong>A question becomes a place.</strong><p>Search the loaded imagery, then select a result to inspect its image and spatial evidence.</p></div></div>
-        <div id="pagination" class="pagination" hidden><button id="prevPage">Previous</button><span id="pageLabel"></span><button id="nextPage">Next</button></div>
+        <div id="results" aria-live="polite"><div class="empty"><div class="empty-shape" aria-hidden="true"></div><strong>A question becomes a place.</strong><p>Choose an evidence workflow, then select a result to inspect its source and spatial checks.</p></div></div>
+        <div id="pagination" class="pagination" hidden><button id="prevPage" type="button">Previous</button><span id="pageLabel" aria-live="polite"></span><button id="nextPage" type="button">Next</button></div>
       </section>
       <footer id="sourceNote" class="source-note">Results describe the loaded evidence. Missing detections or map tags do not establish real-world absence.</footer>
     </aside>
@@ -44,7 +60,7 @@
       <div class="map-toolbar"><span class="map-heading">Study area</span><button id="fitArea" type="button">Fit area</button><details class="layer-picker"><summary>Layers</summary><div id="layers"><label><input type="checkbox" id="imageryToggle" checked> Aerial imagery</label></div></details></div>
       <div class="map-legend"><span><i class="match"></i><span id="matchLegend">Matches</span></span><span><i class="review"></i>Needs review</span><span><i class="reference"></i>Related features</span></div>
       <div id="mapNote" class="map-note">Loading local imagery and map features…</div>
-      <section id="evidence" class="evidence" hidden aria-label="Selected result evidence"><button id="closeEvidence" class="close" aria-label="Close evidence">×</button><div id="evidenceBody"></div></section>
+      <section id="evidence" class="evidence" hidden tabindex="-1" aria-labelledby="evidenceTitle"><button id="closeEvidence" class="close" aria-label="Close selected evidence">×</button><div id="evidenceBody"></div></section>
     </section>
   </main>
 </body>
