@@ -17,7 +17,7 @@ const state = {
   datasets: [],
   datasetId: null,
   vectorLayers: [],
-  basemapMode: "satellite",
+  basemapMode: "street",
   mode: "search",
   assistant: null,
   conversationId: null,
@@ -28,7 +28,7 @@ const state = {
 const $ = id => document.getElementById(id);
 const collection = features => ({type: "FeatureCollection", features});
 const isCount = value => Number.isInteger(value) && value >= 0;
-const finite = value => Number.isFinite(Number(value));
+const finite = value => (typeof value === "number" || typeof value === "string" && value.trim() !== "") && Number.isFinite(Number(value));
 const displayNumber = value => finite(value) ? Number(value).toFixed(3) : "Not available";
 const pretty = value => String(value || "Unknown").replaceAll("_", " ").replace(/\b\w/g, character => character.toUpperCase());
 const safeClass = value => String(value || "unknown").toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
@@ -63,6 +63,15 @@ function safeAssetUrl(value) {
   }
 }
 
+function safeSourceUrl(value) {
+  if (typeof value !== "string" || !value) return null;
+  try {
+    const url = new URL(value);
+    const hosts = ["openstreetmap.org", "nominatim.openstreetmap.org", "maptiler.com", "maptiler.cloud", "overpass-api.de", "planetarycomputer.microsoft.com", "usgs.gov", "usda.gov", "esa.int", "earth-search.aws.element84.com"];
+    return url.protocol === "https:" && hosts.some(host => url.hostname === host || url.hostname.endsWith(`.${host}`)) ? url.href : null;
+  } catch (_) { return null; }
+}
+
 function setStatus(message, type = "") {
   $("searchStatus").textContent = message;
   $("searchStatus").className = `search-status${type ? ` ${type}` : ""}`;
@@ -82,7 +91,7 @@ function setBusy(busy) {
 }
 
 function startBusyStatus() {
-  const messages = ["Understanding the request", "Selecting bounded evidence", "Checking geographic evidence", "Preparing map results"];
+  const messages = ["Understanding your question", "Finding the right geographic sources", "Checking available evidence", "Preparing map results"];
   state.busyIndex = 0;
   setStatus(messages[0]);
   window.clearInterval(state.busyTimer);
@@ -169,8 +178,9 @@ function executionMode(data) {
 function resultProfile(data, feature = null) {
   const kind = String(feature?.properties?.evidence_kind || data?.evidence_kind || "").toLowerCase();
   const resultKind = String(data?.result_kind || "").toLowerCase();
+  if (resultKind === "place_lookup" || kind === "mapped_place" || data?.route === "places") return "place";
   if (resultKind === "tile_retrieval" || executionMode(data) === "explore" || ["image_tile", "image_similarity", "tile_retrieval"].includes(kind)) return "scene";
-  if (["vector_features", "mapped_features", "mapped_records"].includes(resultKind) || kind === "mapped_feature") return "mapped";
+  if (data?.route === "vectors" || ["vector_features", "mapped_features", "mapped_records"].includes(resultKind) || kind === "mapped_feature") return "mapped";
   if (executionMode(data) === "ground" || kind === "live_model_detection") return "live";
   return "cached";
 }
@@ -183,7 +193,7 @@ function resultItems(data) {
 
 function conceptName(data, feature) {
   const properties = feature?.properties || {};
-  return properties.display_name || properties.name || properties.visual_concept || properties.concept_id || data?.plan?.visual_query || data?.plan?.concept_id || null;
+  return properties.name || properties.display_name || properties.visual_concept || properties.concept_id || data?.plan?.visual_query || data?.plan?.concept_id || null;
 }
 
 function fitBounds(bounds, focused = false) {
@@ -217,7 +227,6 @@ function renderDatasetIdentity(datasetId, areaName = null) {
   const detail = datasetDetail(datasetId);
   $("datasetName").textContent = detail?.source || detail?.name || datasetId || "LOCAL EVIDENCE";
   if (areaName || detail?.name) $("areaName").textContent = areaLabel(areaName || detail.name);
-  $("mapAreaLabel").textContent = areaName || detail?.name || "Study area";
 }
 
 function setImageryFocus(active) {
@@ -259,7 +268,7 @@ function addResultSources() {
   addPolygonLayers("review-results", "review-results", {fill: "#e4b361", line: "#ffc875"}, {opacity: .13, width: 1.7, dash: [2.4, 1.6]});
   addPolygonLayers("selected-result", "selected-result", {fill: "#fcfbeb", line: "#fcfbeb"}, {opacity: .1, width: 3});
 
-  for (const layerId of ["scene-results-fill", "linked-results-fill", "review-results-fill"]) {
+  for (const layerId of ["scene-results-fill", "linked-results-fill", "review-results-fill", "scene-results-point", "linked-results-point", "review-results-point"]) {
     state.map.on("click", layerId, event => {
       const id = event.features?.[0]?.properties?._ui_id;
       if (id) selectRecord(id, {moveMap: false});
@@ -280,8 +289,8 @@ async function loadMap(datasetId) {
   const attribution = [...new Set(Object.values(data.attribution || {}).filter(value => typeof value === "string"))].join(" · ");
   const map = state.map = new maplibregl.Map({
     container: "map",
-    center: [-43.711, -22.902],
-    zoom: 15,
+    center: [73.8567, 18.5204],
+    zoom: 5,
     attributionControl: false,
     style: {version: 8, sources: {}, layers: [{id: "background", type: "background", paint: {"background-color": "#e5e9e1"}}]},
   });
@@ -324,15 +333,17 @@ async function loadMap(datasetId) {
 
   addResultSources();
   applyLayerVisibility();
-  fitBounds(state.areaBounds);
-  map.on("mousemove", event => { $("mapCoordinates").textContent = `${Math.abs(event.lngLat.lat).toFixed(5)}° ${event.lngLat.lat < 0 ? "S" : "N"}  /  ${Math.abs(event.lngLat.lng).toFixed(5)}° ${event.lngLat.lng < 0 ? "W" : "E"}`; });
+  const updateCoordinates = position => { $("mapCoordinates").textContent = `${Math.abs(position.lat).toFixed(5)}° ${position.lat < 0 ? "S" : "N"}  /  ${Math.abs(position.lng).toFixed(5)}° ${position.lng < 0 ? "W" : "E"}`; };
+  updateCoordinates(map.getCenter());
+  map.on("moveend", () => updateCoordinates(map.getCenter()));
+  map.on("mousemove", event => updateCoordinates(event.lngLat));
   map.once("idle", () => { $("mapLoading").hidden = true; });
   map.on("sourcedata", event => { if (event.sourceId?.startsWith("imagery-") && event.isSourceLoaded) $("mapLoading").hidden = true; });
   $("fitArea").disabled = false;
   const tileCount = data.counts?.tiles?.available ?? data.tiles?.length ?? 0;
   const footprintCount = data.counts?.vector_layers?.buildings?.available;
-  $("mapMeta").textContent = `${tileCount} SOURCE ${tileCount === 1 ? "TILE" : "TILES"}${isCount(footprintCount) ? ` · ${footprintCount} REFERENCE FOOTPRINTS` : ""}`;
-  $("mapScope").textContent = "Basemap for context · search covers analysis imagery";
+  $("mapMeta").textContent = `WORLDWIDE PLACES · ${tileCount} ANALYSIS ${tileCount === 1 ? "TILE" : "TILES"} AVAILABLE`;
+  $("mapScope").textContent = "Place search is worldwide. Visual analysis uses prepared imagery coverage.";
   renderDatasetIdentity(datasetId, data.area_name);
 }
 
@@ -400,26 +411,40 @@ function displayResults(data, query) {
   const footprintLinks = state.records.filter(record => record.feature.properties?.association === "unique").length;
 
   $("candidateCount").textContent = String(candidateCount);
-  $("candidateLabel").textContent = profile === "scene" ? "IMAGE SCENES" : profile === "mapped" ? "MAPPED RECORDS" : profile === "live" ? "MODEL OBSERVATIONS" : "AI CANDIDATES";
+  $("candidateLabel").textContent = profile === "place" ? "POSSIBLE PLACES" : profile === "scene" ? "IMAGE SCENES" : profile === "mapped" ? "MAPPED RECORDS" : profile === "live" ? "MODEL OBSERVATIONS" : "AI CANDIDATES";
   $("linkCount").textContent = String(profile === "scene" ? (data.tiles_processed ?? linked.length) : profile === "cached" ? footprintLinks : linkedCount);
-  $("linkLabel").textContent = profile === "scene" ? "TILES SEARCHED" : profile === "cached" ? "FOOTPRINT LINKS" : "SUPPORTED";
+  $("linkLabel").textContent = profile === "place" ? "SOURCE RECORDS" : profile === "scene" ? "TILES SEARCHED" : profile === "cached" ? "FOOTPRINT LINKS" : "GEOGRAPHIC MATCHES";
   $("unknownCount").textContent = String(reviewCount);
-  $("unknownLabel").textContent = profile === "scene" ? "OBJECT CLAIMS" : "NEED REVIEW";
+  $("unknownLabel").textContent = profile === "place" ? "NEED REVIEW" : profile === "scene" ? "OBJECT CLAIMS" : "NEED REVIEW";
   $("resultsTitle").textContent = query;
-  const scope = data.claim_scope || "Prepared evidence from the selected dataset; no completeness claim.";
+  const scope = data.claim_scope || "Results reflect returned geographic sources and available imagery; no completeness claim.";
   const returnedCount = linked.length + review.length;
-  $("scopeNote").textContent = `${scope}${candidateCount > returnedCount ? ` Showing ${returnedCount} of ${candidateCount} returned records.` : ""}`;
+  $("scopeNote").textContent = `${scope}${candidateCount > returnedCount ? ` Showing ${returnedCount} of ${candidateCount} ${profile === "mapped" ? "evaluated" : "returned"} records.` : ""}`;
   $("exportResults").disabled = !data.plan && !state.exportUrl;
   $("resultsEmpty").hidden = true;
-  $("resultMetrics").hidden = false;
+  const notice = ["unavailable", "needs_clarification"].includes(data.status);
+  $("resultMetrics").hidden = notice;
   $("closeResults").hidden = false;
   $("scopeNote").hidden = false;
+  $("discoveryStatus").replaceChildren();
+  $("discoveryStatus").hidden = !data.message;
+  $("discoveryStatus").className = `discovery-status ${safeClass(data.status || "completed")}`;
+  if (data.message) {
+    const label = notice ? (data.status === "needs_clarification" ? "A LITTLE MORE DETAIL" : "EVIDENCE AVAILABILITY") : profile === "place" ? "PLACE SEARCH" : profile === "mapped" ? "GEOGRAPHIC SEARCH" : "IMAGERY SEARCH";
+    $("discoveryStatus").append(node("span", label, "discovery-status-label"), node("p", data.message));
+  }
 
   const list = $("resultList");
   list.replaceChildren();
   if (!state.records.length) {
     const empty = node("div", "", "empty-results");
-    empty.append(node("strong", "No findings in this sample"), node("p", "No returned matches does not establish real-world absence. Try a supported example or inspect the source coverage."));
+    empty.append(node("strong", notice ? (data.status === "needs_clarification" ? "Add a detail to continue" : "This search needs suitable data") : "No matches returned"), node("p", notice ? "Adjust your question or try an example with available evidence." : "This does not establish real-world absence. Review the source coverage or try a different search."));
+    if (data.status === "unavailable") {
+      const suggestion = node("button", "Try supported imagery in Phoenix", "notice-action");
+      suggestion.type = "button";
+      suggestion.addEventListener("click", () => { $("query").value = "Find swimming pools within 100 metres of roads in Phoenix"; updateSubmit(); search(); });
+      empty.append(suggestion);
+    }
     list.append(empty);
   } else {
     state.records.forEach((record, index) => list.append(resultCard(record, index)));
@@ -437,8 +462,14 @@ function displayResults(data, query) {
   document.body.classList.add("has-results");
   closeEvidence({restoreFocus: false});
   window.setTimeout(() => state.map?.resize(), 350);
-  fitBounds(featureBounds([...linked, ...review]) || state.areaBounds);
-  if (profile === "scene") setStatus(`${candidateCount} image scenes · no object claim`);
+  fitBounds(featureBounds([...linked, ...review]) || featureBounds(data.context_features || []));
+  const location = data.interpretation?.location_text || data.interpretation?.location;
+  $("mapAreaLabel").textContent = typeof location === "string" ? location : location?.name || (profile === "place" ? "Worldwide place results" : data.area_name || "Geographic results");
+  $("mapMeta").textContent = notice ? "SEARCH NEEDS MORE EVIDENCE" : profile === "place" ? `${linkedCount} POSSIBLE PLACE ${linkedCount === 1 ? "MATCH" : "MATCHES"}` : profile === "mapped" ? `${linkedCount} GEOGRAPHIC MATCHES` : `${candidateCount} IMAGERY CANDIDATES`;
+  $("mapScope").textContent = profile === "place" ? "Mapped place records · inspect the name, address and source." : "Map imagery is context. Results show the evidence actually searched.";
+  if (notice) setStatus(data.status === "needs_clarification" ? "Add the requested detail to continue" : "Imagery or geographic data unavailable for this request");
+  else if (profile === "place") setStatus(`${candidateCount} possible place ${candidateCount === 1 ? "match" : "matches"} · inspect their details`);
+  else if (profile === "scene") setStatus(`${candidateCount} image scenes · no object claim`);
   else if (profile === "mapped") setStatus(`${candidateCount} mapped records`);
   else if (profile === "live") setStatus(`${candidateCount} bounded model observations`);
   else setStatus(`${candidateCount} AI candidates · ${footprintLinks} footprint ${footprintLinks === 1 ? "link" : "links"}`);
@@ -461,22 +492,25 @@ function resultCard(record, index) {
     image.alt = "";
     image.loading = "lazy";
     thumbnail.append(image);
+  } else if (["place", "mapped"].includes(profile)) {
+    thumbnail.classList.add("location-thumb");
+    thumbnail.textContent = String(index + 1).padStart(2, "0");
   } else thumbnail.classList.add("no-image");
 
   const copy = node("span", "", "result-copy");
   const sequence = String(index + 1).padStart(2, "0");
   const concept = conceptName(state.result, record.feature);
-  const title = profile === "scene" ? `Image scene ${sequence}`
-    : profile === "mapped" ? `${pretty(concept || properties.layer || "Mapped record")} ${sequence}`
+  const title = profile === "place" ? (concept || `Possible place ${sequence}`) : profile === "scene" ? `Image scene ${sequence}`
+    : profile === "mapped" ? `${concept || pretty(properties.layer || "Mapped record")} ${concept ? "" : sequence}`.trim()
       : `${pretty(concept || "Model observation")} ${sequence}`;
   copy.append(node("span", title, "result-title"));
-  const subtitle = profile === "scene"
+  const subtitle = profile === "place" ? (properties.display_name || properties.address || "Mapped location · inspect identity") : profile === "scene"
     ? (finite(properties.retrieval_similarity) ? `Whole-image similarity ${Number(properties.retrieval_similarity).toFixed(3)}` : "Whole-image scene candidate")
     : profile === "mapped" ? `Mapped source record${properties.layer ? ` · ${pretty(properties.layer)}` : ""}`
       : `${finite(properties.visual_score) ? `Model score ${Number(properties.visual_score).toFixed(3)}` : "Model score unavailable"}${properties.association === "unique" ? " · footprint linked" : ""}`;
   copy.append(node("span", subtitle, "result-subtitle"));
-  const badgeText = profile === "scene" ? "SCENE ONLY" : profile === "mapped" ? "MAPPED" : record.supported ? "SUPPORTED" : "REVIEW";
-  const badge = node("span", badgeText, `result-badge${record.supported || profile === "mapped" ? " linked" : ""}${profile === "scene" ? " scene" : ""}`);
+  const badgeText = profile === "place" ? "POSSIBLE MATCH" : profile === "scene" ? "SCENE ONLY" : profile === "mapped" ? "MAPPED" : record.supported ? "SUPPORTED" : "REVIEW";
+  const badge = node("span", badgeText, `result-badge${record.supported || ["mapped", "place"].includes(profile) ? " linked" : ""}${profile === "scene" ? " scene" : ""}`);
   button.append(thumbnail, copy, badge);
   button.addEventListener("click", () => selectRecord(record.id));
   return button;
@@ -571,7 +605,7 @@ function conditionCopy(condition) {
       ? ` · verified interval ${Number(interval[0]).toFixed(2)}–${Number(interval[1]).toFixed(2)} m` : "";
     return `${witness}${radius}${range}`;
   }
-  return condition.reason || pretty(condition.status);
+  return condition.reason || condition.note || pretty(condition.status);
 }
 
 function renderEvidence(record) {
@@ -580,28 +614,29 @@ function renderEvidence(record) {
   const profile = record.profile;
   const root = $("evidenceBody");
   const associationLinked = properties.association === "unique";
-  root.replaceChildren(evidenceVisual(record));
-  const label = profile === "scene" ? "WHOLE-IMAGE SCENE"
+  root.replaceChildren();
+  if (["scene", "cached", "live"].includes(profile)) root.append(evidenceVisual(record));
+  const label = profile === "place" ? "GEOGRAPHIC PLACE RECORD" : profile === "scene" ? "WHOLE-IMAGE SCENE"
     : profile === "mapped" ? "MAPPED SOURCE RECORD"
       : profile === "live" ? "BOUNDED MODEL OBSERVATION"
         : "PRECOMPUTED MODEL CANDIDATE";
   root.append(node("p", label, "evidence-label"));
   const concept = conceptName(state.result, feature);
-  const titleText = profile === "scene" ? `Image scene ${String(record.index + 1).padStart(2, "0")}`
+  const titleText = profile === "place" ? (concept || "Possible place match") : profile === "scene" ? `Image scene ${String(record.index + 1).padStart(2, "0")}`
     : profile === "mapped" ? pretty(concept || properties.layer || "Mapped record")
       : pretty(concept || "Model observation");
   const title = node("h2", titleText);
   title.id = "evidenceTitle";
   root.append(title);
-  const summary = profile === "scene"
+  const summary = profile === "place" ? "A possible match from a geographic place index. Check its name, address and source to confirm this is the place you meant." : profile === "scene"
     ? "This candidate ranks an entire source image. It does not locate or verify an object."
-    : profile === "mapped" ? "This geometry comes from the supplied map or vector snapshot."
+    : profile === "mapped" ? "This geometry comes from geographic source records. Any distance or intersection checks are shown below."
       : associationLinked
         ? `The model observation is linked to one supplied reference footprint${record.supported ? " and passes the returned evidence checks" : ", with another check still unresolved"}.`
         : record.supported ? "The bounded model observation passes the returned evidence checks in this sample."
           : "The model observation remains unresolved and needs review.";
   root.append(node("p", summary, "evidence-summary"));
-  const statusText = profile === "scene" ? "SCENE CANDIDATE" : profile === "mapped" ? "MAPPED RECORD" : record.supported ? "SUPPORTED IN SAMPLE" : "NEEDS REVIEW";
+  const statusText = profile === "place" ? "POSSIBLE PLACE MATCH" : profile === "scene" ? "SCENE CANDIDATE" : profile === "mapped" ? "MAPPED RECORD" : record.supported ? "SUPPORTED IN SAMPLE" : "NEEDS REVIEW";
   root.append(node("span", statusText, `evidence-status${record.supported || profile === "mapped" ? " linked" : ""}${profile === "scene" ? " scene" : ""}`));
 
   const details = document.createElement("dl");
@@ -609,22 +644,32 @@ function renderEvidence(record) {
   const geographic = ["cached", "live"].includes(profile) ? observationGeometry(feature) : feature.geometry;
   const bounds = featureBounds([{geometry: geographic}]);
   const centroid = centroidOfGeometry(geographic);
-  addDefinition(details, "Evidence", profile === "scene" ? "Whole-image similarity"
+  addDefinition(details, "Evidence", profile === "place" ? "Mapped place identity and location" : profile === "scene" ? "Whole-image similarity"
     : profile === "mapped" ? "Supplied mapped feature"
       : profile === "live" ? "On-demand OWLv2 observation" : "Precomputed OWLv2 observation");
   addDefinition(details, "Association", ["cached", "live"].includes(profile) ? (associationLinked ? "Unique reference footprint link" : properties.association ? pretty(properties.association) : "Not requested") : null);
   addDefinition(details, "Model score", ["cached", "live"].includes(profile) && finite(properties.visual_score) ? `${Number(properties.visual_score).toFixed(3)} · uncalibrated` : null);
   addDefinition(details, "Image similarity", profile === "scene" && finite(properties.retrieval_similarity) ? `${Number(properties.retrieval_similarity).toFixed(3)} · whole image` : null);
   addDefinition(details, "Pixel box", ["cached", "live"].includes(profile) && Array.isArray(properties.pixel_box) ? `[${properties.pixel_box.map(value => Number(value).toFixed(1)).join(", ")}] px` : null);
-  addDefinition(details, profile === "scene" ? "Scene bounds" : "Geographic bbox", bounds ? `W ${bounds[0].toFixed(6)} · S ${bounds[1].toFixed(6)} · E ${bounds[2].toFixed(6)} · N ${bounds[3].toFixed(6)}` : null);
-  addDefinition(details, "Centroid", centroid ? `${centroid[1].toFixed(6)} lat · ${centroid[0].toFixed(6)} lon` : null);
+  const suppliedBounds = Array.isArray(properties.bbox) && properties.bbox.length === 4 ? properties.bbox.map(Number) : bounds;
+  addDefinition(details, profile === "scene" ? "Scene bounds" : "Geographic bbox", suppliedBounds?.every(Number.isFinite) ? `W ${suppliedBounds[0].toFixed(6)} · S ${suppliedBounds[1].toFixed(6)} · E ${suppliedBounds[2].toFixed(6)} · N ${suppliedBounds[3].toFixed(6)}` : null);
+  addDefinition(details, profile === "place" ? "Coordinates" : "Centroid", centroid ? `${centroid[1].toFixed(6)} lat · ${centroid[0].toFixed(6)} lon` : null);
+  addDefinition(details, "Address", profile === "place" ? properties.display_name || properties.address : null);
+  addDefinition(details, "Source", properties.source || properties.source_name);
+  addDefinition(details, "Retrieved", properties.retrieved_at);
   addDefinition(details, "Footprint", associationLinked ? (properties.id || feature.id) : null);
   addDefinition(details, "Layer", profile === "mapped" ? (properties.subject_layer || properties.layer || properties.source_layer) : null);
   addDefinition(details, "Source tile", properties.tile_id || properties.tile_ids?.[0]);
-  addDefinition(details, "Image date", properties.imagery_date || "Unknown");
+  addDefinition(details, "Image date", ["cached", "live", "scene"].includes(profile) ? properties.imagery_date || "Unknown" : null);
   addDefinition(details, "Model revision", ["cached", "live"].includes(profile) && properties.model_revision ? String(properties.model_revision).slice(0, 12) : null);
   addDefinition(details, "Evidence receipt", properties.evidence_receipt?.id || properties.receipt_id);
   root.append(details);
+  const sourceUrl = safeSourceUrl(properties.source_url);
+  if (sourceUrl) {
+    const link = node("a", "Open geographic source", "source-link");
+    link.href = sourceUrl; link.target = "_blank"; link.rel = "noopener noreferrer";
+    root.append(link);
+  }
 
   const conditions = Array.isArray(properties.conditions) ? properties.conditions : [];
   if (conditions.length) {
@@ -638,7 +683,7 @@ function renderEvidence(record) {
     }
     root.append(section);
   }
-  const disclaimer = profile === "scene"
+  const disclaimer = profile === "place" ? "This is a mapped identity candidate. A matching place name is not an AI detection or proof that the institution is currently operating." : profile === "scene"
     ? "Whole-image similarity retrieves scenes only. It does not establish that a requested object exists or identify its location."
     : profile === "mapped" ? "Mapped records describe the supplied snapshot. Missing records do not establish real-world absence or complete coverage."
       : "Scores are uncalibrated model outputs. These observations and any footprint links describe a bounded evidence sample, not a verified object count or complete real-world coverage.";
@@ -691,6 +736,7 @@ function closeResults() {
   $("resultMetrics").hidden = true;
   $("closeResults").hidden = true;
   $("scopeNote").hidden = true;
+  $("discoveryStatus").hidden = true;
   $("resultsTitle").textContent = "Evidence, not guesses.";
   $("resultList").replaceChildren();
   $("exportResults").disabled = true;
@@ -701,8 +747,7 @@ function closeResults() {
   state.records = [];
   state.result = null;
   state.exportUrl = null;
-  setStatus(`${state.mapData?.tiles?.length || 0} source tiles ready`);
-  fitBounds(state.areaBounds);
+  setStatus("Ready to search places and geographic patterns");
   window.setTimeout(() => state.map?.resize(), 350);
   $("query").focus();
 }
@@ -719,15 +764,25 @@ async function search() {
   appendMessage("user", query);
   $("exampleSection").hidden = true;
   try {
-    if (state.mode === "conversation" && state.assistant?.configured) {
-      await conversationSearch(query, controller);
-      $("query").value = "";
+    const radiusFollowup = /^(?:(?:and\s+)?(?:within|under|less than)(?:\b|(?=[\d.+-]))|(?:make|change|set|increase|decrease|use|try)\s+(?:(?:it|this|that)\b|(?:the\s+)?(?:radius|distance)(?:\b|(?=[\d.+-]))))/i.test(query);
+    const localResult = state.result?.dataset_id && state.datasets.some(dataset => dataset.id === state.result.dataset_id);
+    if (radiusFollowup && state.result && !localResult) {
+      stopBusyStatus();
+      const clarification = {
+        type: "FeatureCollection", status: "needs_clarification", route: state.result.route,
+        result_kind: "coverage_notice", features: [], uncertain_candidates: [], context_features: [],
+        message: "Please restate the full question with its place and new distance. This keeps your search in the intended area.",
+        claim_scope: "No new geographic search was executed.",
+      };
+      state.result = clarification; state.exportUrl = null;
+      displayResults(clarification, query);
+      appendMessage("assistant", clarification.message);
       return;
     }
-    const followup = state.result?.plan && /^(?:(?:and\s+)?(?:within|under|less than)(?:\b|(?=[\d.+-]))|(?:make|change|set|increase|decrease|use|try)\s+(?:(?:it|this|that)\b|(?:the\s+)?(?:radius|distance)(?:\b|(?=[\d.+-]))))/i.test(query);
-    const body = {query, dataset_id: state.datasetId, grounding_tile_limit: 2, page: 0, page_size: 100};
-    if (followup) { body.previous_plan = state.result.plan; body.mode = executionMode(state.result); }
-    const data = await requestJson(followup ? "/api/query" : "/api/search", {
+    const followup = radiusFollowup && localResult && state.result?.plan;
+    const body = {query, dataset_id: state.datasetId};
+    if (followup) body.previous_plan = state.result.plan;
+    const data = await requestJson("/api/discover", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify(body),
@@ -740,10 +795,10 @@ async function search() {
       await loadDataset(resultDataset);
     }
     state.result = data;
-    state.exportUrl = null;
+    state.exportUrl = data.export_url || null;
     displayResults(data, query);
     appendMessage("assistant", resultSummary(data));
-    $("query").value = "";
+    if (!["needs_clarification", "unavailable"].includes(data.status)) $("query").value = "";
   } catch (error) {
     stopBusyStatus();
     if (error.name !== "AbortError") { setStatus(error.message, "error"); appendMessage("assistant", error.message, "message-error"); }
@@ -784,8 +839,9 @@ async function exportResults() {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    const datasetSlug = String(result.dataset_id || state.datasetId || "evidence").replace(/[^a-z0-9_-]+/gi, "-").toLowerCase();
-    anchor.download = `terralens-${datasetSlug}-evidence.geojson`;
+    const exportArea = result.dataset_id || result.interpretation?.location_text || result.location?.name || result.route || "geographic";
+    const datasetSlug = String(exportArea).replace(/[^a-z0-9_-]+/gi, "-").toLowerCase().slice(0, 80);
+    anchor.download = `geoverify-x-${datasetSlug}-evidence.geojson`;
     document.body.append(anchor);
     anchor.click();
     anchor.remove();
@@ -824,37 +880,31 @@ function toggleExpandedMap(force) {
   window.setTimeout(() => state.map?.resize(), 300);
 }
 
-function renderExamples(capabilities) {
-  const tasks = Array.isArray(capabilities.task_catalog) ? capabilities.task_catalog : [];
-  const choices = [];
-  const add = task => { if (task && !choices.some(item => item.query === task.query)) choices.push(task); };
-  const maximum = Number(capabilities.limits?.maximum_distance_m) || 20;
-  const withDistance = (task, metres) => task ? {...task, query: task.query.replace(/within\s+[\d.]+\s+(?:metres|meters)/i, `within ${Math.min(metres, maximum)} metres`)} : null;
-  const cachedSpatial = tasks.filter(task => task.evidence_kind === "cached_model_detection" && /within/i.test(task.query));
-  const pools = cachedSpatial.find(task => /pool/i.test(task.query));
-  const roofs = cachedSpatial.find(task => /roof|building/i.test(task.query));
-  add(withDistance(pools, 100));
-  add(withDistance(roofs || cachedSpatial[0], pools ? 50 : 20));
-  add(withDistance(tasks.find(task => task.evidence_kind === "mapped_feature" && /within/i.test(task.query) && !/=/.test(task.query)), 20));
-  add(tasks.find(task => task.evidence_kind === "mapped_feature" && /roads/i.test(task.query) && !/within/i.test(task.query)));
-  add(tasks.find(task => task.evidence_kind === "image_similarity"));
-  if (choices.length < 5) tasks.filter(task => !/=/.test(task.query)).forEach(add);
+function renderExamples() {
+  const choices = [
+    {query: "Find Sinhagad College in Pune", hint: "Worldwide places"},
+    {query: "Find buildings within 300 metres of a river in Pune", hint: "Geographic relationships"},
+    {query: "Find rooftop solar panels within 500 metres of Pune Municipal Corporation in Pune", hint: "Checks imagery availability"},
+    {query: "Find swimming pools within 100 metres of roads in Phoenix", hint: "Supported visual search"},
+    {query: "Find satellite imagery of densely built neighbourhoods in Phoenix", hint: "Image scene discovery"},
+  ];
   const root = $("exampleList");
   root.replaceChildren();
-  for (const task of choices.slice(0, 5)) {
+  for (const task of choices) {
     const button = node("button", "", "example-query");
     button.type = "button";
-    button.append(node("span", task.query), node("span", "→", "example-arrow"));
+    const copy = node("span", "", "example-copy");
+    copy.append(node("span", task.query), node("span", task.hint, "example-hint"));
+    button.append(copy, node("span", "→", "example-arrow"));
     button.addEventListener("click", () => { $("query").value = task.query; updateSubmit(); search(); });
     root.append(button);
   }
-  if (!choices.length) root.append(node("p", "No supported examples are registered for this area.", "examples-loading"));
-  $("query").placeholder = choices[0]?.query || "Ask a question about this study area…";
+  $("query").placeholder = "Find Sinhagad College in Pune";
 }
 
 function appendMessage(role, message, className = "") {
   const article = node("article", "", `conversation-message chat-message ${role} message-${role}${className ? ` ${className}${className === "message-error" ? " error" : ""}` : ""}`);
-  article.append(node("span", role === "user" ? "YOU" : "TERRALENS", "message-author message-role"), node("p", message));
+  article.append(node("span", role === "user" ? "YOU" : "GEOVERIFY-X", "message-author message-role"), node("p", message));
   const root = $("conversationThread");
   root.append(article);
   root.scrollTop = root.scrollHeight;
@@ -862,6 +912,7 @@ function appendMessage(role, message, className = "") {
 }
 
 function resultSummary(data) {
+  if (data.message) return data.message;
   const profile = resultProfile(data);
   const count = isCount(data.total_matches) ? data.total_matches : resultItems(data).length;
   const review = isCount(data.total_uncertain) ? data.total_uncertain : (data.uncertain_candidates || []).length;
@@ -869,6 +920,7 @@ function resultSummary(data) {
     const scenes = isCount(data.total_tile_candidates) ? data.total_tile_candidates : resultItems(data).length;
     return `${scenes} image ${scenes === 1 ? "scene" : "scenes"} ranked by whole-image similarity. Select a scene to inspect the imagery. This does not locate or verify individual objects.`;
   }
+  if (profile === "place") return `${count} possible place ${count === 1 ? "match" : "matches"}. Inspect the name, address and geographic source to choose the location you meant.`;
   if (profile === "mapped") return `${count} mapped ${count === 1 ? "record" : "records"} matched the search${review ? `; ${review} need review` : ""}. These findings describe the supplied vector snapshot. Select one to see its coordinates and source.`;
   return `${count} model ${count === 1 ? "candidate passes" : "candidates pass"} the returned evidence checks${review ? `; ${review} need review` : ""}. Select a finding to inspect the source image, geographic box and spatial checks. This is a sample, not a complete object inventory.`;
 }
@@ -989,7 +1041,7 @@ async function changeDataset() {
   $("conversationThread").replaceChildren();
   $("exampleSection").hidden = false;
   setBusy(true); setStatus("Loading the selected study area");
-  try { await loadDataset(next); setStatus(`${state.mapData?.tiles?.length || 0} source tiles ready`); }
+  try { await loadDataset(next); fitBounds(state.areaBounds); $("mapAreaLabel").textContent = state.mapData?.area_name || "Analysis imagery coverage"; setStatus("Imagery library loaded. Place search remains worldwide."); }
   catch (error) { $("datasetSelect").value = previous; setStatus(error.message, "error"); }
   finally { setBusy(false); }
 }
@@ -1010,10 +1062,10 @@ async function start() {
     await loadDataset(defaultDataset);
     state.ready = true;
     $("datasetSelect").disabled = false;
-    $("engineStatus").replaceChildren(node("span"), document.createTextNode("Evidence ready"));
+    $("engineStatus").replaceChildren(node("span"), document.createTextNode("Search ready"));
     document.body.classList.add("is-ready");
     $("query").disabled = false;
-    setStatus(`${state.mapData?.tiles?.length || 0} source tiles ready`);
+    setStatus("Ready to search places and geographic patterns");
     updateSubmit();
   } catch (error) {
     state.ready = false;
@@ -1042,7 +1094,7 @@ $("expertMode").addEventListener("click", () => setMode("search"));
 $("conversationMode").addEventListener("click", () => setMode("conversation"));
 $("sourcesNav").addEventListener("click", () => openInfo("sourcePanel", $("sourcesNav")));
 $("helpNav").addEventListener("click", () => openInfo("helpPanel", $("helpNav")));
-$("explorerNav").addEventListener("click", () => { closeInfo(); closeEvidence(); fitBounds(state.areaBounds); $("query").focus(); });
+$("explorerNav").addEventListener("click", () => { closeInfo(); closeEvidence(); $("query").focus(); });
 $("closeSources").addEventListener("click", () => closeInfo());
 $("closeHelp").addEventListener("click", () => closeInfo());
 for (const id of ["evidencePanel", "sourcePanel", "helpPanel"]) $(id).addEventListener("keydown", trapDialogFocus);

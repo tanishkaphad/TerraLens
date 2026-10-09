@@ -1,6 +1,12 @@
-# TerraLens pipeline
+# GeoVerify-X pipeline
 
-An interactive aerial map and same-origin FastAPI service implementing the core visual/spatial search in [workflow.md](../workflow.md). It uses actual precomputed SkyCLIP image embeddings and OWLv2 object detections, then runs live text ranking and metric spatial checks. No live object-grounding claim is made.
+An interactive world map and same-origin FastAPI service implementing [GeoVerify-X 2.0](../workflow.md). One submitted question routes to worldwide named-place lookup, bounded OSM spatial analysis or registered SkyCLIP/OWLv2 imagery evidence. The internal package remains `terralens`.
+
+## Worldwide discovery configuration
+
+The prototype uses Photon place lookup and bounded Overpass geometry extracts. Both are public third-party services; requests are serialized, cached and made after the user submits a search. Set `PHOTON_URL` and `OVERPASS_URL` to operator-managed services for sustained traffic. `WORLD_CACHE_DIR` stores response snapshots under ignored `data/world-cache` by default. No geocoding credential is required for the prototype's Photon service. [Photon service usage](https://github.com/komoot/photon), [Overpass resource sharing](https://dev.overpass-api.de/overpass-doc/en/preface/commons.html).
+
+Mapped spatial queries cover a reported local sample around a resolved location with a reference-data margin; they are not whole-city inventories. Visual searches use actual prepared imagery libraries. No high-resolution Pune imagery is prepared, and no rooftop detections there are claimed.
 
 ## Install and acquire models
 
@@ -19,6 +25,10 @@ python scripts/convert_checkpoint.py
 The conversion accepts only the pinned official legacy checkpoint hash and narrowly allowlists its NumPy scalar metadata using `weights_only=True`. It preserves model tensors and removes training state. Both preparation and serving must use the converted **same** checkpoint; an identity mismatch disables text-image ranking.
 
 `requirements-lock.txt` records the measured macOS/Python 3.12 environment, including development tools. Other platforms need their own runtime check; the lock is not proof of Linux/GPU compatibility.
+
+## Revised durable search backend
+
+The primary `POST /api/search` pipeline uses the runtime catalog, structured entity graph, persistent work-unit workers and complete result snapshots. Run `scripts/run_search.py --port 8020` with this environment. Read [the backend implementation guide](../docs/backend-pipeline.md) for catalog manifests, job control, source/model policies and full map/export contracts. The older sample preparation and direct preview endpoints below remain useful for existing datasets.
 
 ## Acquire real demo data
 
@@ -82,6 +92,9 @@ Optional backend-only environment variables `OPENAI_API_KEY` and `OPENAI_MODEL` 
 | `GET /health`, `GET /ready` | Process liveness and actual model/data capability |
 | `GET /api/capabilities` | Supported classes, fields, predicates, limits and provenance |
 | `GET /api/map` | Bounded imagery quadrilaterals and real vector layers |
+| `GET /api/discovery/status` | Worldwide provider configuration and available imagery areas |
+| `POST /api/discover` | Unified place, mapped spatial or local visual discovery |
+| `GET /api/discovery/runs/{run_id}/export` | Saved GeoJSON evidence snapshot; no provider rerun |
 | `POST /api/query` | Query plus optional previous plan, mode and pagination |
 | `POST /api/export`, `GET /api/export` | Complete GeoJSON using the executed plan and dataset version; GET supports native browser attachments |
 | `GET /api/assets/{tile_id}` | Locally served source preview |

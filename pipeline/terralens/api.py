@@ -8,9 +8,11 @@ import re
 import threading
 from collections import deque
 from functools import lru_cache
+from copy import deepcopy
 from time import monotonic
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 from urllib.parse import quote
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, JSONResponse
@@ -19,7 +21,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from shapely.geometry import box, mapping, shape
 from .bundle import Bundle, BundleError, json_value
-from . import assistant
+from . import assistant, router
 from .configuration import load_configuration
 from .engine import execute
 from .discovery import discovery_plan
@@ -27,16 +29,22 @@ from .grounding import GroundingError, GroundingService, grounding_status
 from .jobs import JobError, JobManager
 from .planner import PlanError, QueryPlan, _rule_plan, plan_query, validate_plan
 from .workflow import WorkflowError
+from .search_api import get_search_service, router as persistent_search_router
 
 load_configuration()
-app = FastAPI(title="GeoVerify-X", version="0.4.0")
+app = FastAPI(title="GeoVerify-X", version="2.0.0")
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 STATIC_DIR = Path(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.include_router(persistent_search_router)
 
 _CHAT_LIMIT_LOCK = threading.Lock()
 _CHAT_REQUESTS: deque[float] = deque()
 _CHAT_REQUESTS_DAY: deque[float] = deque()
+_DISCOVERY_LOCK = threading.Lock()
+_DISCOVERY_RUNS: dict[str, tuple[float, dict]] = {}
+_DISCOVERY_TTL = 1800
+_DISCOVERY_MAX_RUNS = 32
 
 
 class ChatRequest(BaseModel):
@@ -44,6 +52,13 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=2, max_length=2000)
     conversation_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     dataset_id: str | None = Field(default=None, max_length=40, pattern=r"^[a-z0-9_-]+$")
+
+
+class DiscoveryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str = Field(min_length=3, max_length=500)
+    dataset_id: str | None = Field(default=None, max_length=40, pattern=r"^[a-z0-9_-]+$")
+    previous_plan: QueryPlan | None = None
 
 
 @lru_cache(maxsize=1)
@@ -173,7 +188,10 @@ def get_grounding_service() -> GroundingService:
 
 def _bundle(dataset_id: str | None = None) -> Bundle:
     if dataset_id is not None and dataset_id not in _dataset_registry()[0]:
-        raise HTTPException(status_code=404, detail="Unknown or unprepared dataset.")
+        try:
+            return get_search_service().catalog.get_bundle(dataset_id)
+        except BundleError as exc:
+            raise HTTPException(status_code=404, detail="Unknown or unavailable catalog dataset.") from exc
     try:
         return get_bundle(dataset_id) if dataset_id is not None else get_bundle()
     except (BundleError, OSError, ValueError) as exc:
@@ -481,7 +499,7 @@ def query(request: SearchRequest):
     return _run(request)
 
 
-@app.post("/api/search")
+@app.post("/api/legacy/search", deprecated=True)
 def discover(request: SearchRequest):
     if not request.query or request.plan or request.previous_plan or request.grounding_run_id:
         raise HTTPException(status_code=422, detail="Enter a complete natural-language search question.")
@@ -496,6 +514,108 @@ def discover(request: SearchRequest):
     result["interpretation"] = {"method": "catalog constraints and open-vocabulary visual description",
         "note": "Only registered evidence operations execute. Complex language that cannot be safely translated needs clarification."}
     return result
+
+
+def _discovery_local_search(plan: QueryPlan, mode: str, dataset_id: str) -> dict:
+    request = SearchRequest(plan=plan, mode=mode, dataset_id=dataset_id, page_size=100)
+    if mode != "ground":
+        return _run(request, all_results=True)
+    first = _run(request)
+    if not first.get("grounding_run_id"):
+        raise HTTPException(status_code=503, detail="The visual detector did not save an evidence run.")
+    return _run(ExportRequest(plan=plan, mode=mode, dataset_id=dataset_id,
+        grounding_run_id=first["grounding_run_id"], dataset_version=first.get("dataset_version"),
+        include_uncertain=True), all_results=True)
+
+
+def _save_discovery(result: dict) -> dict:
+    """Snapshot executed evidence; a download never calls a provider or model."""
+    result = json_value(result)
+    if result.get("status") != "completed" and not result.get("features"):
+        return result
+    run_id = uuid4().hex
+    result.update(discovery_run_id=run_id, export_url=f"/api/discovery/runs/{run_id}/export",
+        export_expires_in_seconds=_DISCOVERY_TTL)
+    now = monotonic()
+    with _DISCOVERY_LOCK:
+        expired = [key for key, (deadline, _saved) in _DISCOVERY_RUNS.items() if deadline <= now]
+        for key in expired:
+            del _DISCOVERY_RUNS[key]
+        while len(_DISCOVERY_RUNS) >= _DISCOVERY_MAX_RUNS:
+            del _DISCOVERY_RUNS[next(iter(_DISCOVERY_RUNS))]
+        _DISCOVERY_RUNS[run_id] = (now + _DISCOVERY_TTL, deepcopy(result))
+    return result
+
+
+@app.get("/api/discovery/status")
+def discovery_status():
+    registry, default = _dataset_registry()
+    result = router.status_info(registry, default)
+    if os.getenv("GEOVERIFY_ROUND1") == "1":
+        result.update(mode="round1_local_only", scope="Round 1 searches the prepared SpaceNet imagery only.",
+            worldwide_discovery_available=False)
+    else:
+        result["worldwide_discovery_available"] = True
+    return result
+
+
+@app.post("/api/discover")
+def unified_discover(request: DiscoveryRequest):
+    if os.getenv("GEOVERIFY_ROUND1") == "1":
+        raise HTTPException(status_code=422, detail="Round 1 searches the prepared SpaceNet imagery only. Use the local imagery search.")
+    registry, default = _dataset_registry()
+    # Dataset hints do not constrain worldwide named-place discovery. The
+    # router validates a hint only when a local imagery operation needs it.
+    try:
+        result = router.discover(request.query.strip(), dataset_id=request.dataset_id,
+            previous_plan=request.previous_plan, registry=registry, default_dataset=default,
+            bundle_loader=_bundle, local_search=_discovery_local_search)
+    except HTTPException as exc:
+        if exc.status_code not in {422, 503, 404}:
+            raise
+        result = router._notice(request.query, "visual", str(exc.detail),
+            status="needs_clarification" if exc.status_code == 422 else "unavailable")
+    return _save_discovery(result)
+
+
+@app.get("/api/discovery/runs/{run_id}/export")
+def discovery_export(run_id: str):
+    if not re.fullmatch(r"[a-f0-9]{32}", run_id):
+        raise HTTPException(status_code=404, detail="Discovery run not found.")
+    with _DISCOVERY_LOCK:
+        saved = _DISCOVERY_RUNS.get(run_id)
+        if saved is None or saved[0] <= monotonic():
+            _DISCOVERY_RUNS.pop(run_id, None)
+            raise HTTPException(status_code=404, detail="Discovery run expired or is no longer available. Run the search again.")
+        result = deepcopy(saved[1])
+    features = []
+    seen = set()
+
+    def append(feature: dict, role: str, parent=None):
+        identity = (role, str(feature.get("id", "")), json.dumps(feature.get("geometry"), sort_keys=True))
+        if identity in seen:
+            return
+        seen.add(identity)
+        item = deepcopy(feature)
+        item.setdefault("properties", {})["discovery_role"] = role
+        if parent is not None:
+            item["properties"]["discovery_parent_feature_id"] = parent
+        features.append(item)
+        for evidence in feature.get("properties", {}).get("evidence_geometries", []):
+            append(evidence, "evidence_geometry", feature.get("id"))
+
+    for key, role in (("features", "matched"), ("uncertain_candidates", "uncertain"),
+            ("tile_candidates", "tile_candidate"), ("context_features", "context"),
+            ("verification_excluded", "verification_excluded")):
+        for feature in result.get(key, []):
+            append(feature, role)
+    metadata = {key: value for key, value in result.items() if key not in {
+        "features", "uncertain_candidates", "context_features", "tile_candidates", "verification_excluded"}}
+    metadata.setdefault("export_scope", "saved_discovery_evidence")
+    metadata.update(discovery_run_id=run_id, export_note="Saved discovery evidence; no query, model or provider was rerun.",
+        exported_geojson_features=len(features), discovery_result=result)
+    return JSONResponse({"type": "FeatureCollection", "features": features, "metadata": metadata},
+        media_type="application/geo+json", headers={"Content-Disposition": f'attachment; filename="geoverify-discovery-{run_id}.geojson"'})
 
 @app.post("/api/export")
 def export(request: ExportRequest):
