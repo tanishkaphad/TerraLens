@@ -10,3 +10,7 @@ open_clip_torch>=2.30,<3
 torch>=2.5,<3
 transformers>=4.51,<5
 openai>=1.68,<3
+requests>=2.32,<3
+certifi>=2024.2
+safetensors>=0.5,<1
+scipy>=1.14,<2

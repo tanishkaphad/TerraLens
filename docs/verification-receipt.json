@@ -1,0 +1,132 @@
+{
+  "checked_at_utc": "2026-10-09T05:04:43.885957+00:00",
+  "url": "http://127.0.0.1:8000",
+  "scope": "Actual API/model execution; no annotated accuracy evaluation",
+  "checks": [
+    {
+      "path": "/health",
+      "status": 200,
+      "elapsed_seconds": 0.008
+    },
+    {
+      "path": "/ready",
+      "status": 200,
+      "elapsed_seconds": 3.874
+    },
+    {
+      "path": "/api/capabilities",
+      "status": 200,
+      "elapsed_seconds": 0.002
+    },
+    {
+      "path": "/api/map?tile_limit=64&vector_limit=5000",
+      "status": 200,
+      "elapsed_seconds": 1.004
+    },
+    {
+      "path": "/api/query",
+      "status": 200,
+      "elapsed_seconds": 1.075,
+      "query": "Find building roofs within 100 metres of roads",
+      "matches": 69,
+      "uncertain": 79,
+      "objects_evaluated": 148,
+      "export": {
+        "file": "building_roofs-evidence.geojson",
+        "features": 421,
+        "sha256": "dc8743427d0989c8bf179be6d01d696cf008d3470452629f941ca73200cbd02b"
+      }
+    },
+    {
+      "path": "/api/export",
+      "status": 200,
+      "elapsed_seconds": 0.986
+    },
+    {
+      "path": "/api/query",
+      "status": 200,
+      "elapsed_seconds": 0.057,
+      "query": "Find swimming pools within 100 metres of roads",
+      "matches": 4,
+      "uncertain": 0,
+      "objects_evaluated": 4,
+      "export": {
+        "file": "swimming_pools-evidence.geojson",
+        "features": 16,
+        "sha256": "9185f62d1a3078945a9dd41ade7797c36b6e891205e273d9de25c75930437e02"
+      }
+    },
+    {
+      "path": "/api/export",
+      "status": 200,
+      "elapsed_seconds": 0.059
+    },
+    {
+      "path": "/api/query",
+      "status": 200,
+      "elapsed_seconds": 0.446
+    },
+    {
+      "path": "/api/query",
+      "status": 200,
+      "elapsed_seconds": 0.014,
+      "image_candidates": 4
+    },
+    {
+      "path": "/api/query",
+      "status": 422,
+      "elapsed_seconds": 0.001
+    },
+    {
+      "path": "/api/export",
+      "status": 409,
+      "elapsed_seconds": 0.001
+    }
+  ],
+  "readiness": {
+    "status": "ready",
+    "bundle_loaded": true,
+    "dataset_version": "terralens-evidence-v1-448261eff535fc7b860d7a540606af4fb770b1ff04d88e3720ea5e6c9d75aa78",
+    "tiles": 4,
+    "detections": 152,
+    "layers": [
+      "buildings",
+      "roads"
+    ],
+    "retrieval": {
+      "enabled": true,
+      "status": "ready"
+    },
+    "grounded_concepts": [
+      "building_roofs",
+      "swimming_pools"
+    ],
+    "capabilities": {
+      "live_text_image_retrieval": true,
+      "cached_object_spatial_search": true,
+      "live_object_grounding": false
+    },
+    "note": "Precomputed model grounding; live text ranking and spatial checks."
+  },
+  "dataset_version": "terralens-evidence-v1-448261eff535fc7b860d7a540606af4fb770b1ff04d88e3720ea5e6c9d75aa78",
+  "map": {
+    "tiles": {
+      "available": 4,
+      "returned": 4,
+      "truncated": false
+    },
+    "vector_layers": {
+      "roads": {
+        "available": 1079,
+        "returned": 1079,
+        "truncated": false
+      },
+      "buildings": {
+        "available": 2972,
+        "returned": 2972,
+        "truncated": false
+      }
+    }
+  },
+  "result": "passed"
+}

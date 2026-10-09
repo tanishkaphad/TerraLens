@@ -1,4 +1,4 @@
-# GeoVerify-X: Multimodal Infrastructure Search with Verifiable Spatial Evidence
+# TerraLens: Multimodal Infrastructure Search with Verifiable Spatial Evidence
 
 Research and implementation workflow for GEOAI 05. Prepared 9 October 2026.
 
@@ -6,7 +6,7 @@ Research and implementation workflow for GEOAI 05. Prepared 9 October 2026.
 
 **Recommended eight-hour product:** a public application covering one small, real area, with live text search and spatial filtering over genuine, precomputed image embeddings and detections. Every result shows what was observed, which map feature was matched, and how the spatial condition was evaluated.
 
-This is a proposed design, not a completed implementation or measured benchmark. The workspace was empty when this document was prepared. No datasets, model performance, hosting accounts, GPU availability or public deployment have been validated locally. Eight hours is a conditional target, assuming a small team, working accounts, usable imagery and sufficient inference hardware; it is not a guarantee.
+The core now has a locally exercised implementation over a tiny real NAIP/OSM corpus: model embeddings and detections, typed search, metric joins, conversational radius changes, an interactive aerial map and complete GeoJSON exports. See [implementation checks](docs/validation.md) for exact counts and limitations. Independent visual accuracy, hosted accounts and public deployment are still unverified. The broader design and eight-hour public-delivery target remain conditional on data quality, a small team, working accounts and adequate hosting resources.
 
 ## 1. What the problem actually requires
 
@@ -136,11 +136,11 @@ This deliberately bounds the MVP. It is not unrestricted live grounding for arbi
 3. **Use SpaceNet 1 as the reference-aligned fallback if a small subset is readily available.** It provides Rio imagery and building footprints. Its published full training download is 23 GB, so do not make downloading the archive a prerequisite. It does not supply the solar, commercial-use, open-drain or pothole labels needed to validate those claims. Its page specifies CC BY-SA 4.0. [SpaceNet 1](https://spacenet.ai/spacenet-buildings-dataset-v1/)
 4. **Use SkyScript primarily as a model and retrieval reference.** Its image metadata includes geographic bounds and capture time, but scattered focus-object crops are not automatically a continuous municipal atlas. Preserve those metadata if using a subset. Check underlying imagery-source terms separately from the repository's software licence. [SkyScript data documentation](https://github.com/wangzhecheng/SkyScript)
 
-No specific municipal subset has been downloaded or confirmed during this planning task. Dataset access and target geography are the first implementation decisions, not solved prerequisites.
+**Implementation update (9 October 2026):** the initial real-data diagnostic sample is a 600-metre-square Sacramento / Land Park crop, not Pune. The selected NAIP item is `ca_m_3812129_sw_10_060_20220621`: 1,000 × 1,000 RGB pixels, 0.6-metre ground sampling distance, EPSG:26910, acquired 21 June 2022. Actual OSM roads and buildings were extracted with a 525-metre margin on 9 October 2026. The extract contains 1,079 road ways and 2,972 building ways; the queried waterway layer is empty and is not configured as usable drainage evidence. These dates are different epochs and must remain visible. See [dataset notes](docs/datasets.md) and [runnable pipeline](pipeline/README.md).
 
 ### Initial corpus budget
 
-- One bounded area; start with roughly 50–200 tiles and shrink if inference is slow.
+- One bounded area; begin with a tiny diagnostic bundle (the current sample uses four overlapping 640-pixel windows), then expand toward 50–200 tiles only after checking model quality and runtime cost.
 - One imagery acquisition period where possible, with tile-level dates retained.
 - Two reliably observable concepts initially; expand to three to five only after validation.
 - Buildings plus roads as the minimum vector layers; drainage/waterways only where populated and understood.
