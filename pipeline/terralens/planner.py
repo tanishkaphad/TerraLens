@@ -42,7 +42,8 @@ class QueryPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query_type: Literal["objects", "tiles", "vectors"] = "objects"
     concept_id: str | None
-    visual_query: str = Field(min_length=1, max_length=160)
+    visual_query: str = Field(min_length=1, max_length=160, description=(
+        "Never null: a short phrase naming the searched subject (e.g. 'building roofs'), also for vector queries."))
     reference_layer: str | None
     predicate: Literal["within_distance", "intersects"] | None
     distance_m: float | None

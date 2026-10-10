@@ -102,7 +102,7 @@ PROVIDERS = {
 }
 
 # Providers that use Gemini-style nullable schema (no strict:True, no additionalProperties)
-_GEMINI_STYLE = {"gemini", "groq"}
+_GEMINI_STYLE = {"gemini"}
 
 REVIEW_SCHEMA = {
     "type": "object", "additionalProperties": False,
