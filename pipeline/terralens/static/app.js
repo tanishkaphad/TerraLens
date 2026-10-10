@@ -280,7 +280,8 @@ function addResultSources() {
 
 async function loadMap(datasetId) {
   if (!window.maplibregl) throw new Error("The local map renderer is unavailable.");
-  const data = await requestJson(`/api/map?dataset_id=${encodeURIComponent(datasetId)}&tile_limit=64&vector_limit=5000`);
+  // Without a prepared dataset, still show the basemap for worldwide place search.
+  const data = datasetId ? await requestJson(`/api/map?dataset_id=${encodeURIComponent(datasetId)}&tile_limit=64&vector_limit=5000`) : {};
   $("mapLoading").hidden = false;
   destroyMap();
   state.mapData = data;
@@ -339,7 +340,12 @@ async function loadMap(datasetId) {
   map.on("mousemove", event => updateCoordinates(event.lngLat));
   map.once("idle", () => { $("mapLoading").hidden = true; });
   map.on("sourcedata", event => { if (event.sourceId?.startsWith("imagery-") && event.isSourceLoaded) $("mapLoading").hidden = true; });
-  $("fitArea").disabled = false;
+  $("fitArea").disabled = !state.areaBounds;
+  if (!datasetId) {
+    $("mapMeta").textContent = "WORLDWIDE PLACES · NO ANALYSIS IMAGERY PREPARED";
+    $("mapScope").textContent = "Place and mapped-feature search is worldwide. Visual analysis needs a prepared imagery library.";
+    return;
+  }
   const tileCount = data.counts?.tiles?.available ?? data.tiles?.length ?? 0;
   const footprintCount = data.counts?.vector_layers?.buildings?.available;
   $("mapMeta").textContent = `WORLDWIDE PLACES · ${tileCount} ANALYSIS ${tileCount === 1 ? "TILE" : "TILES"} AVAILABLE`;
@@ -352,8 +358,14 @@ async function loadCapabilities(datasetId) {
   state.capabilities = data;
   renderExamples(data);
   state.assistant = data.conversation || state.assistant;
-  $("conversationMode").disabled = !state.assistant?.configured;
-  $("conversationMode").title = state.assistant?.configured ? "Ask questions and follow up through the configured conversation service" : "Conversation service is not configured. Evidence search is available.";
+  const configured = state.assistant?.configured;
+  const provider = state.assistant?.provider || "groq";
+  const model = state.assistant?.model || "";
+  const modelLabel = model ? ` (${model})` : "";
+  $("conversationMode").disabled = !configured;
+  $("conversationMode").title = configured
+    ? `Ask geospatial questions and follow up \u00b7 ${provider.charAt(0).toUpperCase() + provider.slice(1)}${modelLabel} ready`
+    : `GIS conversation not configured \u2014 add ${provider.toUpperCase()}_API_KEY to pipeline/.env. Evidence search still available.`;
   if (data.area_name) renderDatasetIdentity(datasetId, data.area_name);
 }
 
@@ -790,7 +802,7 @@ async function search() {
     });
     stopBusyStatus();
     const resultDataset = data.dataset_id || state.datasetId;
-    if (resultDataset !== state.datasetId) {
+    if (resultDataset !== state.datasetId && datasetDetail(resultDataset)) {
       setStatus("Loading the selected evidence source");
       await loadDataset(resultDataset);
     }
@@ -938,6 +950,28 @@ function setMode(mode) {
   $("query").focus();
 }
 
+async function submitConversation() {
+  const query = $("query").value.trim();
+  if (!state.ready || state.busy || query.length < 3) return;
+  state.searchController?.abort();
+  const controller = new AbortController();
+  state.searchController = controller;
+  setBusy(true);
+  startBusyStatus();
+  appendMessage("user", query);
+  $("exampleSection").hidden = true;
+  try {
+    await conversationSearch(query, controller);
+    $("query").value = "";
+  } catch (error) {
+    stopBusyStatus();
+    if (error.name !== "AbortError") { setStatus(error.message, "error"); appendMessage("assistant", error.message, "message-error"); }
+  } finally {
+    if (state.searchController === controller) state.searchController = null;
+    setBusy(false);
+  }
+}
+
 async function conversationSearch(query, controller) {
   const body = {message: query, dataset_id: state.datasetId};
   if (state.conversationId) body.conversation_id = state.conversationId;
@@ -959,7 +993,7 @@ async function conversationSearch(query, controller) {
   const maps = artifacts.filter(artifact => artifact.kind === "map" && artifact.result);
   const showMap = async artifact => {
     const data = artifact.result;
-    if (data.dataset_id && data.dataset_id !== state.datasetId) await loadDataset(data.dataset_id);
+    if (data.dataset_id && data.dataset_id !== state.datasetId && datasetDetail(data.dataset_id)) await loadDataset(data.dataset_id);
     state.result = data;
     state.exportUrl = response.export_url || null;
     displayResults(data, artifact.title || query);
@@ -1055,17 +1089,31 @@ function trapDialogFocus(event) {
   else if (!event.shiftKey && (document.activeElement === last || document.activeElement === event.currentTarget)) { event.preventDefault(); first.focus(); }
 }
 
+async function startWithoutDataset() {
+  state.datasets = [];
+  state.datasetId = null;
+  renderExamples();
+  state.assistant = await requestJson("/api/assistant/status").catch(() => null);
+  const configured = Boolean(state.assistant?.configured);
+  $("conversationMode").disabled = !configured;
+  $("conversationMode").title = configured ? "Ask geospatial questions and follow up" : "GIS conversation not configured";
+  await loadMap(null);
+  $("datasetName").textContent = "WORLDWIDE PLACES";
+  $("areaName").textContent = "NO IMAGERY LIBRARY";
+}
+
 async function start() {
   setStatus("Loading geographic evidence");
   try {
-    const defaultDataset = await loadDatasets();
-    await loadDataset(defaultDataset);
+    const defaultDataset = await loadDatasets().catch(() => null);
+    if (defaultDataset) await loadDataset(defaultDataset);
+    else await startWithoutDataset();
     state.ready = true;
-    $("datasetSelect").disabled = false;
-    $("engineStatus").replaceChildren(node("span"), document.createTextNode("Search ready"));
+    $("datasetSelect").disabled = !defaultDataset;
+    $("engineStatus").replaceChildren(node("span"), document.createTextNode(defaultDataset ? "Search ready" : "Place search ready"));
     document.body.classList.add("is-ready");
     $("query").disabled = false;
-    setStatus("Ready to search places and geographic patterns");
+    setStatus(defaultDataset ? "Ready to search places and geographic patterns" : "Ready to search places worldwide · no imagery library prepared");
     updateSubmit();
   } catch (error) {
     state.ready = false;
@@ -1078,8 +1126,8 @@ async function start() {
 }
 
 $("query").addEventListener("input", updateSubmit);
-$("query").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); search(); } });
-$("searchForm").addEventListener("submit", event => { event.preventDefault(); search(); });
+$("query").addEventListener("keydown", event => { if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); state.mode === "conversation" ? submitConversation() : search(); } });
+$("searchForm").addEventListener("submit", event => { event.preventDefault(); state.mode === "conversation" ? submitConversation() : search(); });
 $("fitArea").addEventListener("click", () => fitBounds(state.areaBounds));
 $("closeResults").addEventListener("click", closeResults);
 $("exportResults").addEventListener("click", exportResults);

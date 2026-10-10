@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "GeoVerify-X Dev Server",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "uvicorn", "terralens.api:app", "--app-dir", "pipeline", "--host", "127.0.0.1", "--port", "8000", "--reload"],
+      "port": 8000
+    }
+  ]
+}

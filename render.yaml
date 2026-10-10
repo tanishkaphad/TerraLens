@@ -32,8 +32,8 @@ services:
       - key: OMP_NUM_THREADS
         value: "2"
       - key: LLM_PROVIDER
-        value: gemini
-      - key: GEMINI_MODEL
-        value: gemini-3.7-flash
-      - key: GEMINI_API_KEY
+        value: groq
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: GROQ_API_KEY
         sync: false

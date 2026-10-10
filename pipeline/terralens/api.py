@@ -483,7 +483,7 @@ def capabilities(dataset_id: str | None = None):
         "coverage": bundle.manifest.get("coverage", {}), "supported_concepts": bundle.manifest.get("supported_concepts", {}),
         "vector_layers": bundle.manifest.get("vector_layers", {}), "queryable_attributes": bundle.manifest.get("queryable_attributes", []),
         "text_similarity_enabled": retrieval["enabled"], "retrieval": retrieval,
-        "parser": "schema_constrained_language_model" if os.getenv("GEOVERIFY_ROUND1") != "1" and os.getenv("OPENAI_API_KEY") and os.getenv("OPENAI_MODEL") else "conservative_templates",
+        "parser": "schema_constrained_language_model" if os.getenv("GEOVERIFY_ROUND1") != "1" and assistant.status()["configured"] else "conservative_templates",
         "conversation": assistant_status(),
         "supported_predicates": bundle.manifest.get("supported_predicates", ["within_distance", "intersects"]),
         "limits": {"maximum_distance_m": maximum_distance,
